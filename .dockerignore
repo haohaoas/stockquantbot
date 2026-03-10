@@ -1,0 +1,10 @@
+.git
+.idea
+.streamlit
+__pycache__/
+*.pyc
+cache/
+output/
+data/
+web/node_modules/
+web/dist/
