@@ -10,10 +10,22 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     TZ=Asia/Shanghai
 
+ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+ARG PIP_TRUSTED_HOST=mirrors.aliyun.com
+
 WORKDIR /app
 
 COPY requirements.txt ./
-RUN pip install --upgrade pip && pip install -r requirements.txt
+RUN pip install --upgrade pip \
+    --index-url ${PIP_INDEX_URL} \
+    --trusted-host ${PIP_TRUSTED_HOST} \
+    --retries 10 \
+    --timeout 120 \
+    && pip install -r requirements.txt \
+    --index-url ${PIP_INDEX_URL} \
+    --trusted-host ${PIP_TRUSTED_HOST} \
+    --retries 10 \
+    --timeout 120
 
 COPY . ./
 COPY --from=web-builder /web/dist /app/web/dist
