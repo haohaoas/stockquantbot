@@ -18,6 +18,10 @@ _HIST_MEM_CACHE: "OrderedDict[str, tuple[float, pd.DataFrame]]" = OrderedDict()
 _HIST_MEM_LOCK = threading.Lock()
 _HIST_MEM_MAX = 2048
 
+_MANUAL_HIST_CACHE: "OrderedDict[str, tuple[int, int, pd.DataFrame]]" = OrderedDict()
+_MANUAL_HIST_LOCK = threading.Lock()
+_MANUAL_HIST_MAX = 512
+
 
 def _hist_mem_get(key: str, ttl_sec: int) -> pd.DataFrame | None:
     if ttl_sec <= 0:
@@ -41,6 +45,65 @@ def _hist_mem_set(key: str, df: pd.DataFrame) -> None:
         _HIST_MEM_CACHE.move_to_end(key)
         while len(_HIST_MEM_CACHE) > _HIST_MEM_MAX:
             _HIST_MEM_CACHE.popitem(last=False)
+
+
+def _load_manual_hist_cached(path: Path) -> pd.DataFrame:
+    key = str(path.resolve())
+    try:
+        st = path.stat()
+    except Exception:
+        return pd.DataFrame()
+    if st.st_size <= 0:
+        return pd.DataFrame()
+
+    mtime_ns = int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)))
+    fsize = int(st.st_size)
+    with _MANUAL_HIST_LOCK:
+        item = _MANUAL_HIST_CACHE.get(key)
+        if item and int(item[0]) == mtime_ns and int(item[1]) == fsize:
+            _MANUAL_HIST_CACHE.move_to_end(key)
+            return item[2]
+
+    try:
+        dfm = pd.read_csv(path)
+        col_map = {
+            "日期": "date",
+            "开盘": "open",
+            "收盘": "close",
+            "最高": "high",
+            "最低": "low",
+            "成交量": "volume",
+            "成交额": "amount",
+            "date": "date",
+            "open": "open",
+            "close": "close",
+            "high": "high",
+            "low": "low",
+            "volume": "volume",
+            "amount": "amount",
+        }
+        dfm = dfm.rename(columns=col_map)
+        keep = [c for c in ["date", "open", "close", "high", "low", "volume", "amount"] if c in dfm.columns]
+        if "date" not in keep:
+            return pd.DataFrame()
+        out = dfm[keep].copy()
+        out["date"] = out["date"].astype(str).str.slice(0, 10)
+        for c in ["open", "close", "high", "low", "volume", "amount"]:
+            if c in out.columns:
+                out[c] = pd.to_numeric(out[c], errors="coerce")
+        out = out.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
+    except Exception:
+        return pd.DataFrame()
+
+    if out.empty:
+        return out
+
+    with _MANUAL_HIST_LOCK:
+        _MANUAL_HIST_CACHE[key] = (mtime_ns, fsize, out)
+        _MANUAL_HIST_CACHE.move_to_end(key)
+        while len(_MANUAL_HIST_CACHE) > _MANUAL_HIST_MAX:
+            _MANUAL_HIST_CACHE.popitem(last=False)
+    return out
 
 def _eastmoney_spot_page(session: requests.Session, *, page: int, page_size: int, timeout: int) -> pd.DataFrame:
     hosts = [82, 80, 81, 83, 84, 85]
@@ -784,7 +847,7 @@ def fetch_hist(
 
     mem_ttl = 0
     if use_cache and not no_cache:
-        mem_ttl = min(int(cache_ttl_sec), 600) if cache_ttl_sec > 0 else 0
+        mem_ttl = min(int(cache_ttl_sec), 3600) if cache_ttl_sec > 0 else 0
     mem_key = f"{str(symbol).zfill(6)}|{start}|{end}|{period}|{adj}|{manual_hist_dir or ''}"
     df_mem = _hist_mem_get(mem_key, mem_ttl)
     if df_mem is not None and not df_mem.empty:
@@ -793,44 +856,18 @@ def fetch_hist(
     # Prefer manual history if provided.
     if manual_hist_dir:
         manual_path = Path(manual_hist_dir) / f"{str(symbol).zfill(6)}.csv"
-        if manual_path.exists() and manual_path.stat().st_size > 0:
-            try:
-                dfm = pd.read_csv(manual_path)
-                col_map = {
-                    "日期": "date",
-                    "开盘": "open",
-                    "收盘": "close",
-                    "最高": "high",
-                    "最低": "low",
-                    "成交量": "volume",
-                    "成交额": "amount",
-                    "date": "date",
-                    "open": "open",
-                    "close": "close",
-                    "high": "high",
-                    "low": "low",
-                    "volume": "volume",
-                    "amount": "amount",
-                }
-                dfm = dfm.rename(columns=col_map)
-                if "date" in dfm.columns:
-                    dfm["date"] = dfm["date"].astype(str).str.slice(0, 10)
-                    if start:
-                        dfm = dfm[dfm["date"] >= start]
-                    if end:
-                        dfm = dfm[dfm["date"] <= end]
-                keep = [c for c in ["date", "open", "close", "high", "low", "volume", "amount"] if c in dfm.columns]
-                if "date" in keep:
-                    out = dfm[keep].copy()
-                    for c in ["open", "close", "high", "low", "volume", "amount"]:
-                        if c in out.columns:
-                            out[c] = pd.to_numeric(out[c], errors="coerce")
-                    out = out.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
-                    if not out.empty:
-                        _hist_mem_set(mem_key, out)
-                        return out
-            except Exception:
-                pass
+        if manual_path.exists():
+            out = _load_manual_hist_cached(manual_path)
+            if out is not None and not out.empty:
+                sliced = out
+                if start:
+                    sliced = sliced[sliced["date"] >= start]
+                if end:
+                    sliced = sliced[sliced["date"] <= end]
+                sliced = sliced.reset_index(drop=True)
+                if not sliced.empty:
+                    _hist_mem_set(mem_key, sliced)
+                    return sliced
 
     cache_path = None
     if use_cache and not no_cache:

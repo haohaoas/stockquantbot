@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import threading
+import time
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
 
-from sqdata.akshare_fetcher import fetch_hist
+from sqdata.akshare_fetcher import fetch_hist, fetch_a_share_daily_panel
 from sqdata.fetcher import get_realtime
 from features.indicators import sma, hhv, atr, max_drawdown, rsi, macd
 
@@ -43,6 +44,9 @@ def build_factors(
     macd_signal = int(signals_cfg.get("macd_signal", 9))
     realtime_fix = bool(signals_cfg.get("realtime_fix", True))
     realtime_fix_limit = int(signals_cfg.get("realtime_fix_limit", 200))
+    realtime_fix_batch = bool(signals_cfg.get("realtime_fix_batch", True))
+    realtime_fix_batch_limit = int(signals_cfg.get("realtime_fix_batch_limit", 0))
+    realtime_fix_single_fallback = bool(signals_cfg.get("realtime_fix_single_fallback", True))
     realtime_allow_direct_fallback = bool(signals_cfg.get("realtime_allow_direct_fallback", True))
     realtime_provider = str(signals_cfg.get("realtime_provider", "auto")).lower()
     intraday_breakout = bool(signals_cfg.get("intraday_breakout", False))
@@ -62,11 +66,76 @@ def build_factors(
             stats[list_key] = lst
     records = spot_df.to_dict("records")
     fix_budget = {"remaining": realtime_fix_limit}
+    fix_quotes: dict[str, tuple[float, float]] = {}
+
+    if realtime_fix and realtime_fix_batch and not spot_df.empty:
+        close_ser = pd.to_numeric(spot_df.get("close"), errors="coerce")
+        sym_ser = pd.to_numeric(spot_df.get("symbol"), errors="coerce")
+        bad_close_mask = close_ser.isna() | (close_ser <= 0) | (close_ser >= 10000) | ((close_ser - sym_ser).abs() < 1e-6)
+        fix_symbols = (
+            spot_df.loc[bad_close_mask, "symbol"].astype(str).str.zfill(6).drop_duplicates().tolist()
+            if bad_close_mask.any()
+            else []
+        )
+        if realtime_fix_batch_limit > 0:
+            fix_symbols = fix_symbols[:realtime_fix_batch_limit]
+        if stats is not None:
+            stats["spot_fix_batch_candidates"] = int(len(fix_symbols))
+        if fix_symbols:
+            t_batch = time.perf_counter()
+            try:
+                fix_cfg = dict(signals_cfg)
+                fix_cfg["symbols"] = fix_symbols
+                fix_df = fetch_a_share_daily_panel(
+                    trade_date=trade_date,
+                    signals_cfg=fix_cfg,
+                    no_cache=False,
+                    use_proxy=use_proxy,
+                    proxy=proxy,
+                    allow_eastmoney_fallback=False,
+                )
+                if fix_df is not None and not fix_df.empty:
+                    fix_df = fix_df.copy()
+                    fix_df["symbol"] = fix_df["symbol"].astype(str).str.zfill(6)
+                    fix_df["close"] = pd.to_numeric(fix_df.get("close"), errors="coerce")
+                    fix_df["pct_chg"] = pd.to_numeric(fix_df.get("pct_chg"), errors="coerce")
+                    fix_df = fix_df[(fix_df["close"] > 0) & (fix_df["close"] < 10000)]
+                    fix_quotes = {
+                        str(row["symbol"]): (float(row["close"]), float(row["pct_chg"]))
+                        for _, row in fix_df[["symbol", "close", "pct_chg"]].dropna(subset=["symbol", "close"]).iterrows()
+                    }
+            except Exception:
+                if stats is not None:
+                    stats["spot_fix_batch_error"] = int(stats.get("spot_fix_batch_error", 0)) + 1
+            finally:
+                if stats is not None:
+                    elapsed = (time.perf_counter() - t_batch) * 1000.0
+                    stats["time_realtime_fix_batch_ms"] = round(float(stats.get("time_realtime_fix_batch_ms", 0.0)) + elapsed, 2)
+                    stats["spot_fix_batch_hits"] = int(len(fix_quotes))
 
     def _compute_row(r: dict) -> dict | None:
         symbol = str(r["symbol"])
         name = str(r.get("name", ""))
+        row_t0 = time.perf_counter()
+        hist_ms = 0.0
+        rt_fix_ms = 0.0
+        done_timing = False
 
+        def _commit_timing() -> None:
+            nonlocal done_timing
+            if done_timing:
+                return
+            done_timing = True
+            if stats is None:
+                return
+            row_ms = (time.perf_counter() - row_t0) * 1000.0
+            calc_ms = max(row_ms - hist_ms - rt_fix_ms, 0.0)
+            with lock:
+                stats["time_hist_io_ms"] = round(float(stats.get("time_hist_io_ms", 0.0)) + hist_ms, 2)
+                stats["time_realtime_fix_ms"] = round(float(stats.get("time_realtime_fix_ms", 0.0)) + rt_fix_ms, 2)
+                stats["time_factor_calc_ms"] = round(float(stats.get("time_factor_calc_ms", 0.0)) + calc_ms, 2)
+
+        t_hist = time.perf_counter()
         try:
             hist = fetch_hist(
                 symbol,
@@ -80,7 +149,9 @@ def build_factors(
                 use_cache=use_cache,
                 allow_akshare_fallback=allow_akshare_fallback,
             )
+            hist_ms += (time.perf_counter() - t_hist) * 1000.0
         except Exception as e:
+            hist_ms += (time.perf_counter() - t_hist) * 1000.0
             with lock:
                 _inc("hist_error", symbol)
             if stats is not None:
@@ -90,15 +161,18 @@ def build_factors(
                     if len(msgs) < 5:
                         msgs.append(f"{symbol}: {e}")
                     stats[err_key] = msgs
+            _commit_timing()
             return None
 
         if hist.empty:
             with lock:
                 _inc("hist_empty", symbol)
+            _commit_timing()
             return None
         if len(hist) < max(ma_slow, lookback_hhv) + 2:
             with lock:
                 _inc("hist_short", symbol)
+            _commit_timing()
             return None
 
         close = hist["close"]
@@ -352,28 +426,48 @@ def build_factors(
                 return False
             return True
 
+        sym_key = str(symbol).zfill(6)
         if not close_ok and realtime_fix:
-            do_fix = False
-            with lock:
-                if fix_budget["remaining"] > 0:
-                    fix_budget["remaining"] -= 1
-                    do_fix = True
-            if do_fix:
-                try:
-                    q = get_realtime(
-                        symbol,
-                        provider=realtime_provider if realtime_provider else "auto",
-                        use_proxy=use_proxy,
-                        proxy=proxy,
-                        allow_direct_fallback=realtime_allow_direct_fallback,
-                    )
-                    if _price_looks_ok(q.price, last_close, symbol):
-                        spot_close = q.price
-                        spot_pct = q.pct
-                        price_source = "spot_fix"
-                        pct_source = "spot_fix"
-                except Exception:
-                    pass
+            q_batch = fix_quotes.get(sym_key)
+            if q_batch is not None:
+                q_px, q_pct = q_batch
+                if _price_looks_ok(q_px, last_close, symbol):
+                    spot_close = float(q_px)
+                    spot_pct = float(q_pct) if q_pct == q_pct else spot_pct
+                    price_source = "spot_fix_batch"
+                    pct_source = "spot_fix_batch"
+                    with lock:
+                        _inc("spot_fix_batch_used", symbol)
+
+            if price_source == "spot" and realtime_fix_single_fallback:
+                do_fix = False
+                with lock:
+                    if fix_budget["remaining"] > 0:
+                        fix_budget["remaining"] -= 1
+                        do_fix = True
+                        _inc("spot_fix_single_try", symbol)
+                if do_fix:
+                    t_fix = time.perf_counter()
+                    try:
+                        q = get_realtime(
+                            symbol,
+                            provider=realtime_provider if realtime_provider else "auto",
+                            use_proxy=use_proxy,
+                            proxy=proxy,
+                            allow_direct_fallback=realtime_allow_direct_fallback,
+                        )
+                        if _price_looks_ok(q.price, last_close, symbol):
+                            spot_close = q.price
+                            spot_pct = q.pct
+                            price_source = "spot_fix"
+                            pct_source = "spot_fix"
+                            with lock:
+                                _inc("spot_fix_single_hit", symbol)
+                    except Exception:
+                        with lock:
+                            _inc("spot_fix_single_error", symbol)
+                    finally:
+                        rt_fix_ms += (time.perf_counter() - t_fix) * 1000.0
 
         if not close_ok and price_source == "spot":
             spot_close = last_close
@@ -503,6 +597,7 @@ def build_factors(
             )
         with lock:
             _inc("ok", symbol)
+        _commit_timing()
         return row
 
     if use_parallel and max_workers > 1 and len(records) > 1:

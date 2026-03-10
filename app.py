@@ -1672,6 +1672,24 @@ def compute_market(params: dict) -> dict:
     notes.append(
         f"历史行情统计: ok={stats.get('ok', 0)}, empty={stats.get('hist_empty', 0)}, short={stats.get('hist_short', 0)}, error={stats.get('hist_error', 0)}"
     )
+    if any(k in stats for k in ("time_hist_io_ms", "time_realtime_fix_ms", "time_factor_calc_ms", "time_realtime_fix_batch_ms")):
+        notes.append(
+            "因子耗时拆分(累计): "
+            f"hist_io_sum={round(float(stats.get('time_hist_io_ms', 0.0)), 2)}ms, "
+            f"realtime_fix_sum={round(float(stats.get('time_realtime_fix_ms', 0.0)), 2)}ms, "
+            f"calc_sum={round(float(stats.get('time_factor_calc_ms', 0.0)), 2)}ms, "
+            f"batch_prefetch={round(float(stats.get('time_realtime_fix_batch_ms', 0.0)), 2)}ms"
+        )
+        if int(stats.get("spot_fix_batch_candidates", 0)) > 0:
+            notes.append(
+                "补价统计: "
+                f"batch_candidates={int(stats.get('spot_fix_batch_candidates', 0))}, "
+                f"batch_hits={int(stats.get('spot_fix_batch_hits', 0))}, "
+                f"batch_used={int(stats.get('spot_fix_batch_used', 0))}, "
+                f"single_try={int(stats.get('spot_fix_single_try', 0))}, "
+                f"single_hit={int(stats.get('spot_fix_single_hit', 0))}, "
+                f"single_error={int(stats.get('spot_fix_single_error', 0))}"
+            )
     if stats.get("spot_close_fixed") or stats.get("spot_pct_fixed"):
         notes.append(
             f"现价/涨跌幅纠正: close_fixed={stats.get('spot_close_fixed', 0)}, pct_fixed={stats.get('spot_pct_fixed', 0)}"
