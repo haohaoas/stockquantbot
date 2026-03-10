@@ -694,7 +694,7 @@ async function refreshNow() {
   }
   const controller = new AbortController()
   refreshAbortController = controller
-  const timeoutMs = modelIndependent.value ? 25000 : 15000
+  const timeoutMs = modelIndependent.value ? 70000 : 50000
   let timedOut = false
   const timeoutId = setTimeout(() => {
     timedOut = true
@@ -743,7 +743,7 @@ async function refreshNow() {
       const retryController = new AbortController()
       const retryTimeout = setTimeout(() => {
         retryController.abort()
-      }, 15000)
+      }, 50000)
       try {
         const data = await fetchMarketPayload(retryController.signal, false)
         if (requestSeq !== refreshRequestSeq) return

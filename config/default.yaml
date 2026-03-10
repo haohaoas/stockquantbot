@@ -8,6 +8,7 @@ use_universe_file: true
 allow_eastmoney_fallback: false
 trade_calendar_file: ./data/trade_calendar.csv
 use_trade_calendar_file: true
+api_cache_sec: 30
 market_scope:
 - sh
 - sz
