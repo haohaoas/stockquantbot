@@ -701,30 +701,67 @@ async function refreshNow() {
     controller.abort()
   }, timeoutMs)
   loading.value = true
-  try {
-    const url = apiUrl('/api/market')
-    url.searchParams.set('mode', mode.value)
-    url.searchParams.set('provider', provider.value)
-    const modelExists = modelOptions.value.some((x) => String(x.key || '') === String(modelKey.value || ''))
-    if (!modelExists) modelKey.value = ''
-    if (modelKey.value) url.searchParams.set('model', modelKey.value)
-    url.searchParams.set('model_independent', String(modelIndependent.value))
-    if (modelSector.value) url.searchParams.set('model_sector', modelSector.value)
-    url.searchParams.set('top_n', String(topN.value))
-    url.searchParams.set('only_buy', String(onlyBuy.value))
-    url.searchParams.set('intraday', 'false')
-    const res = await fetch(url, { signal: controller.signal })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const data = await res.json()
-    if (requestSeq !== refreshRequestSeq) return
+
+  const applyMarketPayload = (data) => {
     rows.value = data.rows || []
     modelTop.value = data.model_top || []
     notes.value = data.notes || []
     stats.value = data.stats || {}
     marketOpen.value = data.market_open
     serverTime.value = data.server_time || ''
+  }
+
+  const fetchMarketPayload = async (signal, modelIndependentFlag) => {
+    const url = apiUrl('/api/market')
+    url.searchParams.set('mode', mode.value)
+    url.searchParams.set('provider', provider.value)
+    const modelExists = modelOptions.value.some((x) => String(x.key || '') === String(modelKey.value || ''))
+    if (!modelExists) modelKey.value = ''
+    if (modelKey.value) url.searchParams.set('model', modelKey.value)
+    url.searchParams.set('model_independent', String(modelIndependentFlag))
+    if (modelSector.value) url.searchParams.set('model_sector', modelSector.value)
+    url.searchParams.set('top_n', String(topN.value))
+    url.searchParams.set('only_buy', String(onlyBuy.value))
+    url.searchParams.set('intraday', 'false')
+    const res = await fetch(url, { signal })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    return await res.json()
+  }
+  try {
+    const data = await fetchMarketPayload(controller.signal, modelIndependent.value)
+    if (requestSeq !== refreshRequestSeq) return
+    applyMarketPayload(data)
   } catch (e) {
     if (requestSeq !== refreshRequestSeq) return
+    const msg = (e && e.message) ? String(e.message) : 'request failed'
+    const shouldFallback =
+      modelIndependent.value && (
+        (e && e.name === 'AbortError' && timedOut) ||
+        msg.includes('HTTP 504')
+      )
+    if (shouldFallback) {
+      const retryController = new AbortController()
+      const retryTimeout = setTimeout(() => {
+        retryController.abort()
+      }, 15000)
+      try {
+        const data = await fetchMarketPayload(retryController.signal, false)
+        if (requestSeq !== refreshRequestSeq) return
+        modelIndependent.value = false
+        applyMarketPayload(data)
+        const fallbackNotes = Array.isArray(notes.value) ? notes.value.slice() : []
+        fallbackNotes.unshift('模型独立超时，已自动回退到非独立模式')
+        notes.value = fallbackNotes
+        return
+      } catch (retryErr) {
+        if (requestSeq !== refreshRequestSeq) return
+        const retryMsg = (retryErr && retryErr.message) ? retryErr.message : 'fallback failed'
+        notes.value = [`请求失败: ${retryMsg}`]
+        return
+      } finally {
+        clearTimeout(retryTimeout)
+      }
+    }
     if (e && e.name === 'AbortError') {
       if (timedOut) {
         const hint = modelIndependent.value
@@ -734,7 +771,6 @@ async function refreshNow() {
       }
       return
     }
-    const msg = (e && e.message) ? e.message : 'request failed'
     notes.value = [`请求失败: ${msg}`]
   } finally {
     clearTimeout(timeoutId)
