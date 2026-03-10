@@ -1,0 +1,316 @@
+universe:
+  min_price: 4.0
+  max_price: 50.0
+  min_avg_amount_20: 100000000
+  exclude_st: true
+universe_file: ./data/universe.csv
+use_universe_file: true
+allow_eastmoney_fallback: false
+trade_calendar_file: ./data/trade_calendar.csv
+use_trade_calendar_file: true
+market_scope:
+- sh
+- sz
+exclude_star: true
+exclude_chi_next: false
+mainboard_only: true
+watchlist_file: ./data/watchlist.csv
+exclude_limit_up: true
+limit_up_pct: 9.8
+exclude_non_realtime_pct: true
+index:
+  symbol: "000300"
+  ma_window: 200
+  regime_filter: true
+features:
+  set: compact
+signals:
+  preselect_n: 300
+  preselect_layered: true
+  preselect_layer_col: mkt_cap
+  preselect_layer_bins: [0, 30000000000, 100000000000, 300000000000]
+  preselect_layer_weights: [0.6, 0.3, 0.1]
+  preselect_exclude_bank: true
+  preselect_exclude_sector_keywords: ["银行"]
+  preselect_cache: true
+  preselect_cache_ttl_sec: 600
+  preselect_cache_file: ./cache/preselect_symbols.json
+  hist_days: 120
+  lookback_hhv: 20
+  ma_fast: 5
+  ma_mid: 20
+  ma_slow: 60
+  rsi_window: 14
+  macd_fast: 12
+  macd_slow: 26
+  macd_signal: 9
+  vol_ratio_min: 1.5
+  rs_source: ret
+  rs_window: 20
+  realtime_fix: true
+  realtime_fix_limit: 200
+  realtime_allow_direct_fallback: true
+  realtime_provider: tencent
+  realtime_provider_order: ["tencent"]
+  realtime_biying_licence: "30F96AE3-D855-434B-83FB-20551631A984"
+  realtime_biying_base_url: "http://api.biyingapi.com"
+  realtime_biying_timeout: 10
+  realtime_biying_chunk_size: 20
+  realtime_chunk_size: 80
+  realtime_max_workers: 8
+  minute_live_update: true
+  minute_live_only_today: true
+  minute_live_only_missing_today: false
+  minute_live_max_symbols: 200
+  minute_live_max_workers: 10
+  minute_live_cache_sec: 5
+  minute_live_timeout: 4
+  minute_live_limit: 320
+  minute_model_cache_ttl_sec: 0
+  use_proxy: false
+  proxy: ''
+  parallel: true
+  max_workers: 12
+  hist_cache: true
+  hist_cache_ttl_sec: 86400
+  hist_cache_dir: ./cache/hist
+  model_ref:
+    enabled: true
+    path: ./models/lightgbm_fd1_excess_y3_thr2p_k3.json
+    candidate_mode: rule_shared
+    candidate_max_symbols: 3193
+    minute_max_symbols: 300
+    options:
+      minute_v1: ./models/minute_lightgbm_v1_full.json
+    filter_enabled: false
+    min_score: 0.6
+    show_min: 0.7
+    cache_enabled: true
+    cache_ttl_sec: 7200
+    cache_dir: ./cache/model_scores
+  symbols: []
+score_weights:
+  mode: rule
+  breakout: 40
+  rs: 30
+  trend: 20
+  volume: 10
+  rsi: 5
+  macd: 5
+  risk_penalty_max: 20
+  factor_weights:
+    price_accel_5: 0.2
+    price_accel_10: 0.2
+    price_vs_high_20: 0.2
+    price_vs_ma_5: 0.2
+    bull_volume: 0.1
+    volume_shrink_20d: 0.1
+    bear_volume_penalty: 0.1
+sector_boost:
+  enabled: true
+  map_file: ./data/sector_map.csv
+  hot_filter: false
+  hot_filter_min: 1
+  hot_filter_strict: false
+  min_score: 30
+  require_breakout: true
+  require_vol_ok: true
+  min_count: 3
+  boost_per_stock: 1.5
+  max_boost: 6.0
+decision:
+  mode: short_term
+  min_score: 20.0
+  enable_breakout: true
+  breakout_min_score: 20.0
+  require_breakout: true
+  require_vol_ok: false
+  require_shrink_vol: true
+  shrink_vol_ratio_max: 1.0
+  shrink_require_20d: false
+  require_trend_confirmation: true
+  min_trend: 0.8
+  max_atr_pct: 0.08
+  max_mdd20: 0.12
+  watch_near_hhv_pct: 2.0
+  breakout_confirm_days: 0
+  breakout_min_volume_multiple: 0.8
+  require_close_above_breakout: true
+  breakout_within_days: 5
+  breakout_threshold: 0.01
+  require_volume_persistence: false
+  allow_weak_breakout: true
+  require_macd_confirmation: false
+  require_bollinger_breakout: false
+  stop_atr_mult: 2.0
+  target_rr: 2.0
+  enable_pullback: true
+  pullback_ma: 20
+  pullback_max_pct: 2.0
+  pullback_min_score: 10
+  pullback_require_vol_ok: false
+  pullback_vol_ratio_min: 1.0
+  pullback_require_reclaim_ma: false
+  pullback_reclaim_ma_period: 10
+  pullback_require_rsi: true
+  pullback_rsi_min: 35
+  pullback_max_rsi: 65
+  pullback_max_price_from_ma: 0.05
+  pullback_min_days_since_high: 3
+  pullback_require_pct: false
+  pullback_min_pct: -4.0
+  pullback_require_macd: false
+  pullback_override_ratio: 1.5
+  post_filter_rsi_min: 25
+  post_filter_rsi_max: 85
+  post_filter_macd_positive: false
+  weibi_enabled: true
+  weibi_key_signal_only: true
+  weibi_pos_min: 5.0
+  weibi_neg_max: -5.0
+  weibi_strong_pos: 12.0
+  weibi_strong_neg: -12.0
+  weibi_breakout_neg_reduce_scale: 0.6
+  weibi_pullback_pos_boost_scale: 1.2
+  weibi_pullback_neg_reduce_scale: 0.85
+  market_env: auto
+  model_conflict:
+    enabled: true
+    model_min: 0.85
+    rule_max: 20.0
+  profile_filter:
+    enabled: true
+    close_min: 4.0
+    close_max: 40.0
+    pct_min: 0.5
+    pct_max: 6.0
+    upper_wick_gt_body: false
+    require_shrink_up: false
+    shrink_vol_ratio_max: 0.95
+    shrink_require_20d: false
+    mkt_cap_min: 3000000000
+    mkt_cap_max: 30000000000
+    turnover_pct_min: 3.0
+    turnover_pct_max: 15.0
+    fallback_if_empty: true
+  dynamic_volatility:
+    enabled: true
+    window: 20
+    history: 20
+    high_ratio: 1.2
+    low_ratio: 0.8
+    high:
+      vol_min_mult: 1.2
+      breakout_threshold_mult: 1.5
+      require_volume_persistence: true
+    low:
+      vol_min_mult: 0.8
+      breakout_threshold_mult: 0.7
+      require_volume_persistence: false
+  env_overrides:
+    上涨趋势:
+      breakout_min_volume_multiple: 1.5
+      breakout_threshold: 0.02
+      require_volume_persistence: false
+      allow_weak_breakout: false
+      require_bollinger_breakout: false
+    下跌趋势:
+      breakout_min_volume_multiple: 2.0
+      breakout_threshold: 0.03
+      require_volume_persistence: true
+      allow_weak_breakout: false
+      require_macd_confirmation: true
+      require_bollinger_breakout: false
+    震荡市场:
+      breakout_min_volume_multiple: 1.2
+      breakout_threshold: 0.015
+      require_volume_persistence: false
+      allow_weak_breakout: true
+      require_bollinger_breakout: true
+    横盘整理:
+      breakout_min_volume_multiple: 1.1
+      breakout_threshold: 0.01
+      require_volume_persistence: false
+      allow_weak_breakout: true
+      require_bollinger_breakout: true
+  intraday_v2:
+    enabled: true
+    minute_dir: ./data/manual_minute
+    interval: m5
+    only_today: false
+    apply_to_watch: false
+    no_data_action: WATCH
+    no_data_action_after_close: BUY
+    daily_gate_enabled: false
+    daily_close_ma20_ratio: 0.98
+    entry_start: "09:00"
+    entry_end: "14:00"
+    adaptive_volume: false
+    breakout_mult: 1.0015
+    breakout_vol_ratio_min: 1.0
+    breakout_vol_ratio_max: 2.0
+    pullback_ma_dev: 0.005
+    pullback_vol_ratio_max: 1.1
+    extended_z_max: 1.5
+    atr_pct_max: 0.08
+    mdd20_max: 0.12
+output:
+  top_n: 20
+  out_dir: ./output
+  api_cache_sec: 0
+deepseek:
+  enabled: true
+  base_url: https://api.deepseek.com
+  model: deepseek-chat
+  temperature: 0.2
+  max_tokens: 300
+news:
+  summary_cache_sec: 300
+  hot_sector_aliases:
+    科技:
+    - 半导体
+    - 芯片
+    - 电子
+    - 计算机
+    - 软件
+    - 通信
+    - 光模块
+    - AI
+    - 算力
+    - 服务器
+    - 互联网
+    - 机器人
+    AI硬件:
+    - 半导体
+    - 芯片
+    - 光模块
+    - 服务器
+    - 算力
+    - 存储
+    - 电子
+    消费:
+    - 食品饮料
+    - 家电
+    - 零售
+    - 旅游
+    - 酒店
+    - 免税
+    - 餐饮
+    半导体:
+    - 芯片
+    - 集成电路
+    - IC
+    - 设备
+    - 材料
+    大消费:
+    - 食品饮料
+    - 家电
+    - 零售
+    - 旅游
+    - 酒店
+    - 免税
+    - 餐饮
+    黄金:
+    - 贵金属
+    - 金矿
+realtime_refresh_top_n: 50

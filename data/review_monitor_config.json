@@ -1,0 +1,24 @@
+{
+  "updated_at": "2026-03-06T17:28:37+08:00",
+  "review_date": "2026-03-06",
+  "rules": [
+    {
+      "id": "2e17c10145bc",
+      "enabled": true,
+      "rule_text": "入场触发：仅在价格靠近MA20（±1%）且5分钟量比<=1.2时考虑开仓。",
+      "source": "review_assistant"
+    },
+    {
+      "id": "06eefc782672",
+      "enabled": true,
+      "rule_text": "回避触发：当日涨幅超过5%且价格偏离MA5超过3%时不追。",
+      "source": "review_assistant"
+    },
+    {
+      "id": "50a6f3ec58da",
+      "enabled": true,
+      "rule_text": "风控触发：开仓后跌破MA20或单笔亏损达到-2%立即减仓/离场。",
+      "source": "review_assistant"
+    }
+  ]
+}

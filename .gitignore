@@ -1,0 +1,12 @@
+config/secret.json
+cache/
+output/
+__pycache__/
+.DS_Store
+.idea/
+.streamlit/
+web/node_modules/
+web/dist/
+data/manual_hist/
+data/manual_minute/
+*.pyc

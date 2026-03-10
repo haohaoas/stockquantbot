@@ -1,0 +1,51 @@
+{
+  "task": "minute_cls",
+  "interval": "m5",
+  "horizon_bars": 6,
+  "target_ret": 0.002,
+  "feature_cols": [
+    "ret_1",
+    "ret_3",
+    "ret_6",
+    "dist_ma3",
+    "dist_ma6",
+    "dist_ma12",
+    "atr_pct",
+    "vol_ratio5",
+    "range_pct",
+    "bar_pos",
+    "ret_from_open"
+  ],
+  "model_path": "models/minute_lightgbm_v1_full.txt",
+  "metrics": {
+    "val_auc": 0.6040837596566484,
+    "val_logloss": 0.662036900412712,
+    "val_acc": 0.5654658636221652,
+    "val_topk_hit": 0.5081300813008129,
+    "train_rows": 800000,
+    "val_rows": 2958076,
+    "train_pos_rate": 0.268,
+    "val_pos_rate": 0.2605585522481505,
+    "symbols": 1870,
+    "dates": 723
+  },
+  "args": {
+    "minute_dir": "data/manual_minute",
+    "interval": "m5",
+    "years": 3,
+    "max_symbols": 1870,
+    "max_days_per_symbol": 0,
+    "horizon_bars": 6,
+    "target_ret": 0.002,
+    "key_signal_only": true,
+    "entry_start": "09:00",
+    "entry_end": "14:00",
+    "train_months": 12,
+    "val_months": 4,
+    "topk": 3,
+    "seed": 7,
+    "max_train_rows": 800000,
+    "out": "models/minute_lightgbm_v1_full.json"
+  },
+  "generated_at": "2026-03-03T11:09:44.603549"
+}
