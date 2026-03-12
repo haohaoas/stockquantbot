@@ -44,6 +44,9 @@ if _WEB_ASSETS_DIR.exists():
 _MARKET_CACHE: dict[str, dict[str, Any]] = {}
 _MARKET_CACHE_LOCK = threading.Lock()
 _NEWS_SUMMARY_CACHE: dict[str, dict[str, Any]] = {}
+_SNAPSHOT_REFRESH_STATE: dict[str, dict[str, Any]] = {}
+_SNAPSHOT_SCHEDULER_STARTED = False
+_SNAPSHOT_SCHEDULER_LOCK = threading.Lock()
 _REVIEW_JOURNAL_LOCK = threading.Lock()
 _REVIEW_JOURNAL_PATH = Path("./data/review_journal.json")
 _REVIEW_MONITOR_CFG_PATH = Path("./data/review_monitor_config.json")
@@ -88,6 +91,14 @@ def _get_market_cache(key: str, ttl_sec: int) -> dict[str, Any] | None:
         if now - float(entry.get("ts", 0)) > ttl_sec:
             return None
         return entry.get("data")
+
+
+def _get_market_cache_entry(key: str) -> dict[str, Any] | None:
+    with _MARKET_CACHE_LOCK:
+        entry = _MARKET_CACHE.get(key)
+        if not entry:
+            return None
+        return dict(entry)
 
 
 def _set_market_cache(key: str, data: dict[str, Any]) -> None:
@@ -331,6 +342,302 @@ def _append_market_notes(
     return payload
 
 
+def _resolve_runtime_context(cfg: dict) -> tuple[dt.datetime, bool]:
+    now_cn = dt.datetime.now(tz=ZoneInfo("Asia/Shanghai"))
+    trade_calendar_file = str(cfg.get("trade_calendar_file", "./data/trade_calendar.csv"))
+    use_trade_calendar_file = bool(cfg.get("use_trade_calendar_file", True))
+    calendar_dates = app_module._load_trade_calendar(trade_calendar_file) if use_trade_calendar_file else set()
+    market_open = app_module._is_market_open_cn(now_cn) and app_module._is_trading_day_cn(now_cn.date(), calendar_dates)
+    return now_cn, market_open
+
+
+def _enrich_runtime_payload(
+    payload: dict[str, Any],
+    *,
+    market_open: bool,
+    now_cn: dt.datetime,
+    extra_note: str | None = None,
+) -> dict[str, Any]:
+    out = dict(payload)
+    out["market_open"] = market_open
+    out["server_time"] = now_cn.isoformat()
+    notes = list(out.get("notes") or [])
+    if extra_note:
+        notes.append(extra_note)
+    out["notes"] = notes
+    return out
+
+
+def _compute_market_snapshot(
+    *,
+    mode: str,
+    top_n: int | None,
+    only_buy: bool,
+    intraday: bool,
+    model: str | None,
+    provider: str | None,
+    model_independent: bool,
+    model_sector: str | None,
+) -> tuple[dict[str, Any], dict, dict, str, int]:
+    params, cfg = _build_params(mode, top_n, intraday, model, provider, model_independent, model_sector)
+    cache_ttl = _resolve_cache_ttl(cfg)
+    model_identity = _resolve_model_identity(params)
+    cache_key = _market_cache_key(
+        mode,
+        top_n,
+        only_buy,
+        intraday,
+        model_identity,
+        provider,
+        bool(model_independent),
+        model_sector,
+    )
+    result = app_module.compute_market(params)
+    df = result.get("df", pd.DataFrame())
+    if only_buy and not df.empty and "action" in df.columns:
+        df = df[df["action"] == "BUY"].copy()
+    payload = {
+        "rows": _df_to_records(df),
+        "model_top": _df_to_records(result.get("model_top", pd.DataFrame())),
+        "notes": result.get("notes", []),
+        "stats": result.get("stats", {}),
+        "trade_date": str(app_module.resolve_trade_date("")),
+    }
+    payload = _append_market_notes(
+        payload,
+        params=params,
+        provider=provider,
+        model_independent=bool(model_independent),
+        model_sector=model_sector,
+    )
+    return payload, cfg, params, cache_key, cache_ttl
+
+
+def _compute_model_top_snapshot(
+    *,
+    mode: str,
+    top_n: int | None,
+    intraday: bool,
+    model: str | None,
+    provider: str | None,
+    model_independent: bool,
+    model_sector: str | None,
+) -> tuple[dict[str, Any], dict, dict, str, int]:
+    params, cfg = _build_params(mode, top_n, intraday, model, provider, model_independent, model_sector)
+    params["model_top_only"] = True
+    cache_ttl = _resolve_cache_ttl(cfg)
+    model_identity = _resolve_model_identity(params)
+    cache_key = "model_top|" + _market_cache_key(
+        mode,
+        top_n,
+        False,
+        intraday,
+        model_identity,
+        provider,
+        bool(model_independent),
+        model_sector,
+    )
+    result = app_module.compute_market(params)
+    payload = {
+        "model_top": _df_to_records(result.get("model_top", pd.DataFrame())),
+        "notes": result.get("notes", []),
+        "stats": result.get("stats", {}),
+        "trade_date": str(app_module.resolve_trade_date("")),
+    }
+    payload = _append_market_notes(
+        payload,
+        params=params,
+        provider=provider,
+        model_independent=bool(model_independent),
+        model_sector=model_sector,
+    )
+    return payload, cfg, params, cache_key, cache_ttl
+
+
+def _prepare_snapshot_context(
+    *,
+    kind: str,
+    mode: str,
+    top_n: int | None,
+    only_buy: bool,
+    intraday: bool,
+    model: str | None,
+    provider: str | None,
+    model_independent: bool,
+    model_sector: str | None,
+) -> tuple[dict, dict, str, int]:
+    params, cfg = _build_params(mode, top_n, intraday, model, provider, model_independent, model_sector)
+    if kind == "model_top":
+        params["model_top_only"] = True
+    cache_ttl = _resolve_cache_ttl(cfg)
+    model_identity = _resolve_model_identity(params)
+    cache_key = _market_cache_key(
+        mode,
+        top_n,
+        only_buy if kind == "market" else False,
+        intraday,
+        model_identity,
+        provider,
+        bool(model_independent),
+        model_sector,
+    )
+    if kind == "model_top":
+        cache_key = "model_top|" + cache_key
+    return params, cfg, cache_key, cache_ttl
+
+
+def _snapshot_refresh_running(key: str) -> bool:
+    with _MARKET_CACHE_LOCK:
+        st = _SNAPSHOT_REFRESH_STATE.get(key) or {}
+        return bool(st.get("running", False))
+
+
+def _trigger_snapshot_refresh(
+    key: str,
+    runner,
+    *,
+    min_gap_sec: int = 5,
+) -> bool:
+    now = time.time()
+    with _MARKET_CACHE_LOCK:
+        st = _SNAPSHOT_REFRESH_STATE.get(key) or {}
+        if bool(st.get("running", False)):
+            return False
+        if now - float(st.get("last_trigger_ts", 0.0) or 0.0) < max(1, int(min_gap_sec)):
+            return False
+        _SNAPSHOT_REFRESH_STATE[key] = {
+            **st,
+            "running": True,
+            "last_trigger_ts": now,
+        }
+
+    def _worker() -> None:
+        err = ""
+        try:
+            payload = runner()
+            if isinstance(payload, dict):
+                _set_market_cache(key, payload)
+        except Exception as e:
+            err = str(e)
+        finally:
+            with _MARKET_CACHE_LOCK:
+                st2 = _SNAPSHOT_REFRESH_STATE.get(key) or {}
+                st2["running"] = False
+                st2["last_finish_ts"] = time.time()
+                st2["last_error"] = err
+                _SNAPSHOT_REFRESH_STATE[key] = st2
+
+    threading.Thread(target=_worker, daemon=True, name=f"snapshot-refresh:{key[:32]}").start()
+    return True
+
+
+def _default_provider(cfg: dict) -> str:
+    signals_cfg = cfg.get("signals", {}) or {}
+    provider = str(signals_cfg.get("realtime_provider", "auto") or "auto").strip().lower()
+    return provider if provider in {"auto", "biying", "tencent", "sina", "netease"} else "auto"
+
+
+def _resolve_refresh_intervals(cfg: dict) -> tuple[int, int, int]:
+    output_cfg = cfg.get("output", {}) or {}
+    market_sec = int(output_cfg.get("backend_market_refresh_sec", 300) or 300)
+    model_sec = int(output_cfg.get("backend_model_refresh_sec", 300) or 300)
+    model_independent_sec = int(output_cfg.get("backend_model_independent_refresh_sec", 24 * 3600) or (24 * 3600))
+    return market_sec, model_sec, model_independent_sec
+
+
+def _maybe_schedule_background_refresh(
+    *,
+    kind: str,
+    mode: str,
+    top_n: int | None,
+    only_buy: bool,
+    intraday: bool,
+    model: str | None,
+    provider: str | None,
+    model_independent: bool,
+    model_sector: str | None,
+    force: bool = False,
+) -> tuple[str, bool]:
+    _, cfg, cache_key, _ = _prepare_snapshot_context(
+        kind=kind,
+        mode=mode,
+        top_n=top_n,
+        only_buy=only_buy,
+        intraday=intraday,
+        model=model,
+        provider=provider,
+        model_independent=model_independent,
+        model_sector=model_sector,
+    )
+    if kind == "market":
+        runner = lambda: _compute_market_snapshot(
+            mode=mode,
+            top_n=top_n,
+            only_buy=only_buy,
+            intraday=intraday,
+            model=model,
+            provider=provider,
+            model_independent=model_independent,
+            model_sector=model_sector,
+        )[0]
+    else:
+        runner = lambda: _compute_model_top_snapshot(
+            mode=mode,
+            top_n=top_n,
+            intraday=intraday,
+            model=model,
+            provider=provider,
+            model_independent=model_independent,
+            model_sector=model_sector,
+        )[0]
+    min_gap = 0 if force else max(5, int(_resolve_cache_ttl(cfg) or 5))
+    triggered = _trigger_snapshot_refresh(cache_key, runner, min_gap_sec=min_gap)
+    return cache_key, triggered
+
+
+def _snapshot_scheduler_loop() -> None:
+    while True:
+        try:
+            cfg = app_module.load_config("config/default.yaml")
+            provider = _default_provider(cfg)
+            market_sec, model_sec, model_independent_sec = _resolve_refresh_intervals(cfg)
+            specs = [
+                ("market", {"mode": "all", "top_n": None, "only_buy": False, "intraday": False, "model": None, "provider": provider, "model_independent": False, "model_sector": None}, market_sec),
+                ("model_top", {"mode": "all", "top_n": None, "only_buy": False, "intraday": False, "model": None, "provider": provider, "model_independent": False, "model_sector": None}, model_sec),
+                ("model_top", {"mode": "all", "top_n": None, "only_buy": False, "intraday": False, "model": None, "provider": provider, "model_independent": True, "model_sector": None}, model_independent_sec),
+            ]
+            now_cn, market_open = _resolve_runtime_context(cfg)
+            today = str(app_module.resolve_trade_date(""))
+            for kind, kwargs, interval_sec in specs:
+                if kind == "market" and not market_open:
+                    continue
+                _, _, cache_key, _ = _prepare_snapshot_context(kind=kind, **kwargs)
+                entry = _get_market_cache_entry(cache_key)
+                if entry is None:
+                    _maybe_schedule_background_refresh(kind=kind, force=True, **kwargs)
+                    continue
+                age = time.time() - float(entry.get("ts", 0.0) or 0.0)
+                payload = entry.get("data") or {}
+                trade_date = str(payload.get("trade_date", "") or "")
+                due = age >= max(30, int(interval_sec))
+                if kind == "model_top" and trade_date != today:
+                    due = True
+                if due:
+                    _maybe_schedule_background_refresh(kind=kind, force=True, **kwargs)
+        except Exception:
+            pass
+        time.sleep(30)
+
+
+def _start_snapshot_scheduler() -> None:
+    global _SNAPSHOT_SCHEDULER_STARTED
+    with _SNAPSHOT_SCHEDULER_LOCK:
+        if _SNAPSHOT_SCHEDULER_STARTED:
+            return
+        threading.Thread(target=_snapshot_scheduler_loop, daemon=True, name="snapshot-scheduler").start()
+        _SNAPSHOT_SCHEDULER_STARTED = True
+
+
 @app.get("/", include_in_schema=False)
 def index():
     # Serve built web UI in production; fallback to Vite dev server for local development.
@@ -344,6 +651,11 @@ def health() -> dict:
     return {"ok": True}
 
 
+@app.on_event("startup")
+def on_startup() -> None:
+    _start_snapshot_scheduler()
+
+
 @app.get("/api/market")
 def get_market(
     mode: str = Query("all", pattern="^(all|watchlist)$"),
@@ -355,60 +667,52 @@ def get_market(
     model_independent: bool = Query(False),
     model_sector: str | None = Query(None),
 ) -> dict:
-    params, cfg = _build_params(mode, top_n, intraday, model, provider, model_independent, model_sector)
-
-    now_cn = dt.datetime.now(tz=ZoneInfo("Asia/Shanghai"))
-    trade_calendar_file = str(cfg.get("trade_calendar_file", "./data/trade_calendar.csv"))
-    use_trade_calendar_file = bool(cfg.get("use_trade_calendar_file", True))
-    calendar_dates = app_module._load_trade_calendar(trade_calendar_file) if use_trade_calendar_file else set()
-    market_open = app_module._is_market_open_cn(now_cn) and app_module._is_trading_day_cn(now_cn.date(), calendar_dates)
-
-    cache_ttl = _resolve_cache_ttl(cfg)
-    model_identity = _resolve_model_identity(params)
-    cache_key = _market_cache_key(
-        mode,
-        top_n,
-        only_buy,
-        intraday,
-        model_identity,
-        provider,
-        bool(model_independent),
-        model_sector,
+    _start_snapshot_scheduler()
+    _, cfg, cache_key, cache_ttl = _prepare_snapshot_context(
+        kind="market",
+        mode=mode,
+        top_n=top_n,
+        only_buy=only_buy,
+        intraday=intraday,
+        model=model,
+        provider=provider,
+        model_independent=model_independent,
+        model_sector=model_sector,
     )
+    now_cn, market_open = _resolve_runtime_context(cfg)
     cached = _get_market_cache(cache_key, cache_ttl)
     if cached is not None:
-        out = dict(cached)
-        out["market_open"] = market_open
-        out["server_time"] = now_cn.isoformat()
-        notes = list(out.get("notes") or [])
-        if cache_ttl > 0:
-            notes.append(f"缓存命中({cache_ttl}s)")
-        out["notes"] = notes
-        return out
+        return _enrich_runtime_payload(cached, market_open=market_open, now_cn=now_cn, extra_note=f"缓存命中({cache_ttl}s)")
 
-    result = app_module.compute_market(params)
-    df = result.get("df", pd.DataFrame())
-    if only_buy and not df.empty and "action" in df.columns:
-        df = df[df["action"] == "BUY"].copy()
+    entry = _get_market_cache_entry(cache_key)
+    if entry is not None and entry.get("data"):
+        _maybe_schedule_background_refresh(
+            kind="market",
+            mode=mode,
+            top_n=top_n,
+            only_buy=only_buy,
+            intraday=intraday,
+            model=model,
+            provider=provider,
+            model_independent=model_independent,
+            model_sector=model_sector,
+            force=True,
+        )
+        note = "展示缓存快照，后台刷新中" if _snapshot_refresh_running(cache_key) else "展示缓存快照，后台刷新已触发"
+        return _enrich_runtime_payload(entry["data"], market_open=market_open, now_cn=now_cn, extra_note=note)
 
-    model_top = result.get("model_top", pd.DataFrame())
-    payload = {
-        "rows": _df_to_records(df),
-        "model_top": _df_to_records(model_top),
-        "notes": result.get("notes", []),
-        "stats": result.get("stats", {}),
-    }
-    payload = _append_market_notes(
-        payload,
-        params=params,
+    payload, _, _, _, _ = _compute_market_snapshot(
+        mode=mode,
+        top_n=top_n,
+        only_buy=only_buy,
+        intraday=intraday,
+        model=model,
         provider=provider,
-        model_independent=bool(model_independent),
+        model_independent=model_independent,
         model_sector=model_sector,
     )
     _set_market_cache(cache_key, payload)
-    payload["market_open"] = market_open
-    payload["server_time"] = now_cn.isoformat()
-    return payload
+    return _enrich_runtime_payload(payload, market_open=market_open, now_cn=now_cn)
 
 
 @app.get("/api/model-top")
@@ -421,55 +725,72 @@ def get_model_top(
     model_independent: bool = Query(False),
     model_sector: str | None = Query(None),
 ) -> dict:
-    params, cfg = _build_params(mode, top_n, intraday, model, provider, model_independent, model_sector)
-    params["model_top_only"] = True
-
-    now_cn = dt.datetime.now(tz=ZoneInfo("Asia/Shanghai"))
-    trade_calendar_file = str(cfg.get("trade_calendar_file", "./data/trade_calendar.csv"))
-    use_trade_calendar_file = bool(cfg.get("use_trade_calendar_file", True))
-    calendar_dates = app_module._load_trade_calendar(trade_calendar_file) if use_trade_calendar_file else set()
-    market_open = app_module._is_market_open_cn(now_cn) and app_module._is_trading_day_cn(now_cn.date(), calendar_dates)
-
-    cache_ttl = _resolve_cache_ttl(cfg)
-    model_identity = _resolve_model_identity(params)
-    cache_key = "model_top|" + _market_cache_key(
-        mode,
-        top_n,
-        False,
-        intraday,
-        model_identity,
-        provider,
-        bool(model_independent),
-        model_sector,
-    )
-    cached = _get_market_cache(cache_key, cache_ttl)
-    if cached is not None:
-        out = dict(cached)
-        out["market_open"] = market_open
-        out["server_time"] = now_cn.isoformat()
-        notes = list(out.get("notes") or [])
-        if cache_ttl > 0:
-            notes.append(f"缓存命中({cache_ttl}s)")
-        out["notes"] = notes
-        return out
-
-    result = app_module.compute_market(params)
-    payload = {
-        "model_top": _df_to_records(result.get("model_top", pd.DataFrame())),
-        "notes": result.get("notes", []),
-        "stats": result.get("stats", {}),
-    }
-    payload = _append_market_notes(
-        payload,
-        params=params,
+    _start_snapshot_scheduler()
+    _, cfg, cache_key, cache_ttl = _prepare_snapshot_context(
+        kind="model_top",
+        mode=mode,
+        top_n=top_n,
+        only_buy=False,
+        intraday=intraday,
+        model=model,
         provider=provider,
-        model_independent=bool(model_independent),
+        model_independent=model_independent,
         model_sector=model_sector,
     )
-    _set_market_cache(cache_key, payload)
-    payload["market_open"] = market_open
-    payload["server_time"] = now_cn.isoformat()
-    return payload
+    now_cn, market_open = _resolve_runtime_context(cfg)
+    cached = _get_market_cache(cache_key, cache_ttl)
+    if cached is not None:
+        return _enrich_runtime_payload(cached, market_open=market_open, now_cn=now_cn, extra_note=f"缓存命中({cache_ttl}s)")
+
+    entry = _get_market_cache_entry(cache_key)
+    if entry is not None and entry.get("data"):
+        _maybe_schedule_background_refresh(
+            kind="model_top",
+            mode=mode,
+            top_n=top_n,
+            only_buy=False,
+            intraday=intraday,
+            model=model,
+            provider=provider,
+            model_independent=model_independent,
+            model_sector=model_sector,
+            force=True,
+        )
+        note = "展示缓存快照，后台刷新中" if _snapshot_refresh_running(cache_key) else "展示缓存快照，后台刷新已触发"
+        return _enrich_runtime_payload(entry["data"], market_open=market_open, now_cn=now_cn, extra_note=note)
+
+    if mode == "watchlist" or not model_independent:
+        payload, _, _, _, _ = _compute_model_top_snapshot(
+            mode=mode,
+            top_n=top_n,
+            intraday=intraday,
+            model=model,
+            provider=provider,
+            model_independent=model_independent,
+            model_sector=model_sector,
+        )
+        _set_market_cache(cache_key, payload)
+        return _enrich_runtime_payload(payload, market_open=market_open, now_cn=now_cn)
+
+    _maybe_schedule_background_refresh(
+        kind="model_top",
+        mode=mode,
+        top_n=top_n,
+        only_buy=False,
+        intraday=intraday,
+        model=model,
+        provider=provider,
+        model_independent=model_independent,
+        model_sector=model_sector,
+        force=True,
+    )
+    placeholder = {
+        "model_top": [],
+        "notes": ["模型榜单首次生成中，后台已启动预热"],
+        "stats": {},
+        "trade_date": str(app_module.resolve_trade_date("")),
+    }
+    return _enrich_runtime_payload(placeholder, market_open=market_open, now_cn=now_cn)
 
 
 @app.get("/api/model-options")
