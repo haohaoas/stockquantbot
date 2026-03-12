@@ -54,7 +54,7 @@
       </div>
       <div class="control">
         <label>模型独立</label>
-        <input type="checkbox" v-model="modelIndependent" @change="refreshNow" />
+        <input type="checkbox" v-model="modelIndependent" @change="refreshModelTop" />
       </div>
       <div class="control">
         <label>模型板块</label>
@@ -62,7 +62,7 @@
           type="text"
           v-model.trim="modelSector"
           placeholder="如 半导体/消费"
-          @keydown.enter.prevent="refreshNow"
+          @keydown.enter.prevent="refreshModelTop"
         />
       </div>
       <div class="control">
@@ -230,9 +230,12 @@
           <div class="panel-header">
             <h2>模型 Top</h2>
             <span class="meta">{{ modelTop.length }} 条</span>
+            <span class="meta" v-if="modelLoading">刷新中...</span>
           </div>
           <div class="note" v-if="!isWatchlist">右键任意行添加到自选</div>
-          <ul class="list">
+          <div v-if="modelLoading" class="muted">模型候选刷新中...</div>
+          <div v-else-if="modelTop.length === 0" class="muted">暂无模型结果</div>
+          <ul v-else class="list">
             <li v-for="row in modelTop" :key="row.symbol" @contextmenu.prevent="openContextMenu($event, row.symbol)">
               <div>
                 <div class="title">
@@ -373,6 +376,7 @@ const modelTop = ref([])
 const notes = ref([])
 const stats = ref({})
 const loading = ref(false)
+const modelLoading = ref(false)
 const mode = ref('all')
 const provider = ref('biying')
 const modelOptions = ref([{ key: '', label: 'default', path: '' }])
@@ -424,6 +428,8 @@ const contextStyle = computed(() => ({ left: contextMenu.value.x + 'px', top: co
 let refreshTimer = null
 let refreshAbortController = null
 let refreshRequestSeq = 0
+let modelAbortController = null
+let modelRequestSeq = 0
 const apiOrigin = (() => {
   const envBase = String(import.meta.env.VITE_API_BASE || '').trim().replace(/\/+$/, '')
   if (envBase) return envBase
@@ -604,11 +610,16 @@ async function fetchModelOptions() {
   }
 }
 
+function syncSelectedModelKey() {
+  const exists = modelOptions.value.some((x) => String(x.key || '') === String(modelKey.value || ''))
+  if (!exists) modelKey.value = ''
+}
+
 function setModelKey(key) {
   const k = String(key || '')
   if (modelKey.value === k) return
   modelKey.value = k
-  refreshNow()
+  refreshModelTop()
 }
 
 async function fetchNews() {
@@ -692,8 +703,13 @@ async function refreshNow() {
   if (refreshAbortController) {
     refreshAbortController.abort()
   }
+  if (modelAbortController) {
+    modelAbortController.abort()
+    modelAbortController = null
+  }
   const controller = new AbortController()
   refreshAbortController = controller
+  const fullModelSeq = ++modelRequestSeq
   const timeoutMs = modelIndependent.value ? 70000 : 50000
   let timedOut = false
   const timeoutId = setTimeout(() => {
@@ -701,6 +717,7 @@ async function refreshNow() {
     controller.abort()
   }, timeoutMs)
   loading.value = true
+  modelLoading.value = true
 
   const applyMarketPayload = (data) => {
     rows.value = data.rows || []
@@ -715,8 +732,7 @@ async function refreshNow() {
     const url = apiUrl('/api/market')
     url.searchParams.set('mode', mode.value)
     url.searchParams.set('provider', provider.value)
-    const modelExists = modelOptions.value.some((x) => String(x.key || '') === String(modelKey.value || ''))
-    if (!modelExists) modelKey.value = ''
+    syncSelectedModelKey()
     if (modelKey.value) url.searchParams.set('model', modelKey.value)
     url.searchParams.set('model_independent', String(modelIndependentFlag))
     if (modelSector.value) url.searchParams.set('model_sector', modelSector.value)
@@ -779,6 +795,83 @@ async function refreshNow() {
     }
     if (requestSeq === refreshRequestSeq) {
       loading.value = false
+    }
+    if (fullModelSeq === modelRequestSeq) {
+      modelLoading.value = false
+    }
+  }
+}
+
+async function refreshModelTop() {
+  const requestSeq = ++modelRequestSeq
+  if (modelAbortController) {
+    modelAbortController.abort()
+  }
+  const controller = new AbortController()
+  modelAbortController = controller
+  const timeoutMs = modelIndependent.value ? 70000 : 50000
+  let timedOut = false
+  const timeoutId = setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, timeoutMs)
+  modelLoading.value = true
+
+  const applyModelPayload = (data) => {
+    modelTop.value = data.model_top || []
+    marketOpen.value = data.market_open
+    serverTime.value = data.server_time || ''
+  }
+
+  const fetchModelPayload = async (signal, modelIndependentFlag) => {
+    const url = apiUrl('/api/model-top')
+    url.searchParams.set('mode', mode.value)
+    url.searchParams.set('provider', provider.value)
+    syncSelectedModelKey()
+    if (modelKey.value) url.searchParams.set('model', modelKey.value)
+    url.searchParams.set('model_independent', String(modelIndependentFlag))
+    if (modelSector.value) url.searchParams.set('model_sector', modelSector.value)
+    url.searchParams.set('top_n', String(topN.value))
+    url.searchParams.set('intraday', 'false')
+    const res = await fetch(url, { signal })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    return await res.json()
+  }
+
+  try {
+    const data = await fetchModelPayload(controller.signal, modelIndependent.value)
+    if (requestSeq !== modelRequestSeq) return
+    applyModelPayload(data)
+  } catch (e) {
+    if (requestSeq !== modelRequestSeq) return
+    const msg = (e && e.message) ? String(e.message) : 'request failed'
+    const shouldFallback =
+      modelIndependent.value && (
+        (e && e.name === 'AbortError' && timedOut) ||
+        msg.includes('HTTP 504')
+      )
+    if (shouldFallback) {
+      const retryController = new AbortController()
+      const retryTimeout = setTimeout(() => {
+        retryController.abort()
+      }, 50000)
+      try {
+        const data = await fetchModelPayload(retryController.signal, false)
+        if (requestSeq !== modelRequestSeq) return
+        modelIndependent.value = false
+        applyModelPayload(data)
+        return
+      } finally {
+        clearTimeout(retryTimeout)
+      }
+    }
+  } finally {
+    clearTimeout(timeoutId)
+    if (modelAbortController === controller) {
+      modelAbortController = null
+    }
+    if (requestSeq === modelRequestSeq) {
+      modelLoading.value = false
     }
   }
 }
@@ -995,6 +1088,10 @@ onUnmounted(() => {
   if (refreshAbortController) {
     refreshAbortController.abort()
     refreshAbortController = null
+  }
+  if (modelAbortController) {
+    modelAbortController.abort()
+    modelAbortController = null
   }
 })
 

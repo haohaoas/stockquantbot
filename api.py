@@ -310,6 +310,27 @@ def _get_model_options(cfg: dict) -> dict[str, Any]:
     }
 
 
+def _append_market_notes(
+    payload: dict[str, Any],
+    *,
+    params: dict,
+    provider: str | None,
+    model_independent: bool,
+    model_sector: str | None,
+) -> dict[str, Any]:
+    notes = list(payload.get("notes") or [])
+    if params.get("model_key"):
+        notes.append(f"模型切换: {params['model_key']}")
+    if provider:
+        notes.append(f"行情源切换: {provider}")
+    if model_independent:
+        notes.append("模型候选池: 独立于规则池")
+    if model_sector:
+        notes.append(f"模型板块筛选: {model_sector}")
+    payload["notes"] = notes
+    return payload
+
+
 @app.get("/", include_in_schema=False)
 def index():
     # Serve built web UI in production; fallback to Vite dev server for local development.
@@ -377,22 +398,73 @@ def get_market(
         "notes": result.get("notes", []),
         "stats": result.get("stats", {}),
     }
-    if params.get("model_key"):
-        notes = list(payload.get("notes") or [])
-        notes.append(f"模型切换: {params['model_key']}")
-        payload["notes"] = notes
-    if provider:
-        notes = list(payload.get("notes") or [])
-        notes.append(f"行情源切换: {provider}")
-        payload["notes"] = notes
-    if model_independent:
-        notes = list(payload.get("notes") or [])
-        notes.append("模型候选池: 独立于规则池")
-        payload["notes"] = notes
-    if model_sector:
-        notes = list(payload.get("notes") or [])
-        notes.append(f"模型板块筛选: {model_sector}")
-        payload["notes"] = notes
+    payload = _append_market_notes(
+        payload,
+        params=params,
+        provider=provider,
+        model_independent=bool(model_independent),
+        model_sector=model_sector,
+    )
+    _set_market_cache(cache_key, payload)
+    payload["market_open"] = market_open
+    payload["server_time"] = now_cn.isoformat()
+    return payload
+
+
+@app.get("/api/model-top")
+def get_model_top(
+    mode: str = Query("all", pattern="^(all|watchlist)$"),
+    top_n: int | None = Query(None),
+    intraday: bool = Query(False),
+    model: str | None = Query(None),
+    provider: str | None = Query(None, pattern="^(auto|biying|tencent|sina|netease)?$"),
+    model_independent: bool = Query(False),
+    model_sector: str | None = Query(None),
+) -> dict:
+    params, cfg = _build_params(mode, top_n, intraday, model, provider, model_independent, model_sector)
+
+    now_cn = dt.datetime.now(tz=ZoneInfo("Asia/Shanghai"))
+    trade_calendar_file = str(cfg.get("trade_calendar_file", "./data/trade_calendar.csv"))
+    use_trade_calendar_file = bool(cfg.get("use_trade_calendar_file", True))
+    calendar_dates = app_module._load_trade_calendar(trade_calendar_file) if use_trade_calendar_file else set()
+    market_open = app_module._is_market_open_cn(now_cn) and app_module._is_trading_day_cn(now_cn.date(), calendar_dates)
+
+    cache_ttl = _resolve_cache_ttl(cfg)
+    model_identity = _resolve_model_identity(params)
+    cache_key = "model_top|" + _market_cache_key(
+        mode,
+        top_n,
+        False,
+        intraday,
+        model_identity,
+        provider,
+        bool(model_independent),
+        model_sector,
+    )
+    cached = _get_market_cache(cache_key, cache_ttl)
+    if cached is not None:
+        out = dict(cached)
+        out["market_open"] = market_open
+        out["server_time"] = now_cn.isoformat()
+        notes = list(out.get("notes") or [])
+        if cache_ttl > 0:
+            notes.append(f"缓存命中({cache_ttl}s)")
+        out["notes"] = notes
+        return out
+
+    result = app_module.compute_market(params)
+    payload = {
+        "model_top": _df_to_records(result.get("model_top", pd.DataFrame())),
+        "notes": result.get("notes", []),
+        "stats": result.get("stats", {}),
+    }
+    payload = _append_market_notes(
+        payload,
+        params=params,
+        provider=provider,
+        model_independent=bool(model_independent),
+        model_sector=model_sector,
+    )
     _set_market_cache(cache_key, payload)
     payload["market_open"] = market_open
     payload["server_time"] = now_cn.isoformat()
