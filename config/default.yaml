@@ -77,7 +77,7 @@ signals:
   hist_cache_dir: ./cache/hist
   model_ref:
     enabled: true
-    path: ./models/lightgbm_fd1_excess_y3_q80q20_shortv3_k3.json
+    path: ./models/lightgbm_fd1_excess_y3_q90q10_shortv3_k3_norefit.json
     candidate_mode: rule_shared
     candidate_max_symbols: 3193
     minute_max_symbols: 300
