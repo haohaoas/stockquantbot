@@ -587,6 +587,19 @@ def _resolve_refresh_intervals(cfg: dict) -> tuple[int, int, int]:
     return market_sec, model_sec, model_independent_sec
 
 
+def _scheduled_model_keys(cfg: dict) -> list[str | None]:
+    signals_cfg = (cfg or {}).get("signals", {}) or {}
+    model_ref_cfg = signals_cfg.get("model_ref") or {}
+    options = model_ref_cfg.get("options") or {}
+    keys: list[str | None] = [None]
+    for key in sorted(options.keys()):
+        k = str(key or "").strip()
+        if not k:
+            continue
+        keys.append(k)
+    return keys
+
+
 def _maybe_schedule_background_refresh(
     *,
     kind: str,
@@ -645,9 +658,14 @@ def _snapshot_scheduler_loop() -> None:
             market_sec, model_sec, model_independent_sec = _resolve_refresh_intervals(cfg)
             specs = [
                 ("market", {"mode": "all", "top_n": None, "only_buy": False, "intraday": False, "model": None, "provider": provider, "model_independent": False, "model_sector": None}, market_sec),
-                ("model_top", {"mode": "all", "top_n": None, "only_buy": False, "intraday": False, "model": None, "provider": provider, "model_independent": False, "model_sector": None}, model_sec),
-                ("model_top", {"mode": "all", "top_n": None, "only_buy": False, "intraday": False, "model": None, "provider": provider, "model_independent": True, "model_sector": None}, model_independent_sec),
             ]
+            for model_key in _scheduled_model_keys(cfg):
+                specs.append(
+                    ("model_top", {"mode": "all", "top_n": None, "only_buy": False, "intraday": False, "model": model_key, "provider": provider, "model_independent": False, "model_sector": None}, model_sec)
+                )
+                specs.append(
+                    ("model_top", {"mode": "all", "top_n": None, "only_buy": False, "intraday": False, "model": model_key, "provider": provider, "model_independent": True, "model_sector": None}, model_independent_sec)
+                )
             now_cn, market_open = _resolve_runtime_context(cfg)
             today = str(app_module.resolve_trade_date(""))
             for kind, kwargs, interval_sec in specs:
