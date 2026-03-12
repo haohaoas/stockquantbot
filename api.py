@@ -368,6 +368,41 @@ def _enrich_runtime_payload(
     return out
 
 
+def _refresh_model_top_quotes(
+    payload: dict[str, Any],
+    *,
+    params: dict,
+) -> dict[str, Any]:
+    model_rows = payload.get("model_top") or []
+    if not isinstance(model_rows, list) or not model_rows:
+        return dict(payload)
+
+    df = pd.DataFrame(model_rows)
+    if df.empty or "symbol" not in df.columns:
+        return dict(payload)
+
+    signals_cfg = params.get("signals", {}) or {}
+    provider = str(signals_cfg.get("realtime_provider", "auto") or "auto").strip().lower()
+    use_proxy = bool(signals_cfg.get("use_proxy", False))
+    proxy = str(signals_cfg.get("proxy", "") or "")
+    max_rows = min(len(df), int(params.get("top_n") or len(df)))
+
+    try:
+        refreshed = app_module.refresh_realtime_for_view(
+            df,
+            use_proxy=use_proxy,
+            proxy=proxy,
+            max_rows=max_rows,
+            provider=provider,
+        )
+    except Exception:
+        refreshed = df
+
+    out = dict(payload)
+    out["model_top"] = _df_to_records(refreshed)
+    return out
+
+
 def _compute_market_snapshot(
     *,
     mode: str,
@@ -403,6 +438,7 @@ def _compute_market_snapshot(
         "stats": result.get("stats", {}),
         "trade_date": str(app_module.resolve_trade_date("")),
     }
+    payload = _refresh_model_top_quotes(payload, params=params)
     payload = _append_market_notes(
         payload,
         params=params,
@@ -444,6 +480,7 @@ def _compute_model_top_snapshot(
         "stats": result.get("stats", {}),
         "trade_date": str(app_module.resolve_trade_date("")),
     }
+    payload = _refresh_model_top_quotes(payload, params=params)
     payload = _append_market_notes(
         payload,
         params=params,
@@ -682,6 +719,7 @@ def get_market(
     now_cn, market_open = _resolve_runtime_context(cfg)
     cached = _get_market_cache(cache_key, cache_ttl)
     if cached is not None:
+        cached = _refresh_model_top_quotes(cached, params=params)
         return _enrich_runtime_payload(cached, market_open=market_open, now_cn=now_cn, extra_note=f"缓存命中({cache_ttl}s)")
 
     entry = _get_market_cache_entry(cache_key)
@@ -699,7 +737,8 @@ def get_market(
             force=True,
         )
         note = "展示缓存快照，后台刷新中" if _snapshot_refresh_running(cache_key) else "展示缓存快照，后台刷新已触发"
-        return _enrich_runtime_payload(entry["data"], market_open=market_open, now_cn=now_cn, extra_note=note)
+        payload = _refresh_model_top_quotes(entry["data"], params=params)
+        return _enrich_runtime_payload(payload, market_open=market_open, now_cn=now_cn, extra_note=note)
 
     payload, _, _, _, _ = _compute_market_snapshot(
         mode=mode,
@@ -740,6 +779,7 @@ def get_model_top(
     now_cn, market_open = _resolve_runtime_context(cfg)
     cached = _get_market_cache(cache_key, cache_ttl)
     if cached is not None:
+        cached = _refresh_model_top_quotes(cached, params=params)
         return _enrich_runtime_payload(cached, market_open=market_open, now_cn=now_cn, extra_note=f"缓存命中({cache_ttl}s)")
 
     entry = _get_market_cache_entry(cache_key)
@@ -757,7 +797,8 @@ def get_model_top(
             force=True,
         )
         note = "展示缓存快照，后台刷新中" if _snapshot_refresh_running(cache_key) else "展示缓存快照，后台刷新已触发"
-        return _enrich_runtime_payload(entry["data"], market_open=market_open, now_cn=now_cn, extra_note=note)
+        payload = _refresh_model_top_quotes(entry["data"], params=params)
+        return _enrich_runtime_payload(payload, market_open=market_open, now_cn=now_cn, extra_note=note)
 
     if mode == "watchlist" or not model_independent:
         payload, _, _, _, _ = _compute_model_top_snapshot(
@@ -770,6 +811,7 @@ def get_model_top(
             model_sector=model_sector,
         )
         _set_market_cache(cache_key, payload)
+        payload = _refresh_model_top_quotes(payload, params=params)
         return _enrich_runtime_payload(payload, market_open=market_open, now_cn=now_cn)
 
     _maybe_schedule_background_refresh(
