@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import os
 import threading
 import time
@@ -10,6 +11,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+import requests
 
 from backtest_optimize import load_config, load_universe_info, load_trade_calendar, pick_trade_days
 from sqdata.akshare_fetcher import fetch_hist
@@ -130,6 +132,94 @@ def _is_market_open_cn(now: dt.datetime) -> bool:
     return (570 <= t <= 690) or (780 <= t <= 900)
 
 
+def _remove_file(path: Path) -> bool:
+    try:
+        if path.exists():
+            path.unlink()
+            return True
+    except Exception:
+        return False
+    return False
+
+
+def _clear_post_update_disk_caches(cfg: dict) -> dict[str, int]:
+    signals_cfg = cfg.get("signals", {}) or {}
+    model_ref_cfg = signals_cfg.get("model_ref", {}) or {}
+    removed = {"preselect": 0, "model_scores": 0}
+
+    preselect_cache_file = str(signals_cfg.get("preselect_cache_file", "./cache/preselect_symbols.json") or "").strip()
+    if preselect_cache_file and _remove_file(Path(preselect_cache_file)):
+        removed["preselect"] = 1
+
+    model_cache_dir = str(model_ref_cfg.get("cache_dir", "./cache/model_scores") or "").strip()
+    if model_cache_dir:
+        cache_dir = Path(model_cache_dir)
+        if cache_dir.exists():
+            for fp in cache_dir.glob("*.csv"):
+                if _remove_file(fp):
+                    removed["model_scores"] += 1
+    return removed
+
+
+def _write_refresh_signal(end_date: str, stats: dict[str, int], *, signal_path: str = "./cache/data_refresh_signal.json") -> None:
+    p = Path(signal_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "ts": time.time(),
+        "end_date": str(end_date),
+        "stats": {k: int(v) for k, v in stats.items()},
+    }
+    p.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def _post_refresh_prewarm(
+    cfg: dict,
+    *,
+    api_base: str,
+    provider: str,
+    timeout: int,
+) -> tuple[int, int]:
+    base = str(api_base or "").strip().rstrip("/")
+    if not base:
+        return 0, 0
+
+    signals_cfg = cfg.get("signals", {}) or {}
+    model_ref_cfg = signals_cfg.get("model_ref") or {}
+    model_options = model_ref_cfg.get("options") or {}
+    targets: list[str | None] = [None]
+    for key in sorted(model_options.keys()):
+        k = str(key or "").strip()
+        if k:
+            targets.append(k)
+
+    session = requests.Session()
+    ok = 0
+    fail = 0
+
+    urls = [
+        f"{base}/api/market?mode=all&provider={provider}&top_n=20&only_buy=false&intraday=false&model_independent=false",
+    ]
+    for model_key in targets:
+        q_model = f"&model={model_key}" if model_key else ""
+        urls.append(
+            f"{base}/api/model-top?mode=all&provider={provider}&top_n=20{q_model}&model_independent=false"
+        )
+        urls.append(
+            f"{base}/api/model-top?mode=all&provider={provider}&top_n=20{q_model}&model_independent=true"
+        )
+
+    for url in urls:
+        try:
+            resp = session.get(url, timeout=max(5, int(timeout)))
+            if resp.ok:
+                ok += 1
+            else:
+                fail += 1
+        except Exception:
+            fail += 1
+    return ok, fail
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Backfill manual_hist using Tencent kline")
     parser.add_argument("--config", default="config/default.yaml")
@@ -167,6 +257,9 @@ def main() -> None:
     parser.add_argument("--fill-rt", action="store_true", help="Append today's bar from realtime quote if still missing.")
     parser.add_argument("--use-proxy", action="store_true")
     parser.add_argument("--proxy", default="")
+    parser.add_argument("--skip-post-refresh", action="store_true", help="Skip cache bust + API prewarm after update.")
+    parser.add_argument("--prewarm-api-base", default="http://127.0.0.1:8000", help="Local API base used for post-update prewarm.")
+    parser.add_argument("--prewarm-timeout", type=int, default=20)
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -387,6 +480,24 @@ def main() -> None:
         f"[ok] done: ok={stats['ok']} skip={stats['skip']} empty={stats['empty']} error={stats['error']} "
         f"range={start_date}~{end_date}"
     )
+
+    if args.skip_post_refresh:
+        return
+
+    removed = _clear_post_update_disk_caches(cfg)
+    _write_refresh_signal(end_date, stats)
+    print(
+        f"[info] cache cleared: preselect={removed['preselect']} model_score_files={removed['model_scores']}"
+    )
+
+    provider = str((cfg.get("signals", {}) or {}).get("realtime_provider", "tencent") or "tencent").strip().lower()
+    ok, fail = _post_refresh_prewarm(
+        cfg,
+        api_base=args.prewarm_api_base,
+        provider=provider if provider in {"auto", "biying", "tencent", "sina", "netease"} else "tencent",
+        timeout=args.prewarm_timeout,
+    )
+    print(f"[info] post-refresh prewarm: ok={ok} fail={fail} base={args.prewarm_api_base}")
 
 
 if __name__ == "__main__":

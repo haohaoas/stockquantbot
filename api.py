@@ -24,6 +24,7 @@ import app as app_module
 from sqdata.news_fetcher import fetch_news_eastmoney, simple_sentiment
 from sqdata.news_sentiment import get_market_news_sentiment
 from sqdata.ai_explain import explain_row
+from sqdata import akshare_fetcher as akshare_module
 
 app = FastAPI(title="StockQuantBot API", version="0.1.0")
 
@@ -50,6 +51,8 @@ _SNAPSHOT_SCHEDULER_LOCK = threading.Lock()
 _REVIEW_JOURNAL_LOCK = threading.Lock()
 _REVIEW_JOURNAL_PATH = Path("./data/review_journal.json")
 _REVIEW_MONITOR_CFG_PATH = Path("./data/review_monitor_config.json")
+_CACHE_BUST_SIGNAL_PATH = Path("./cache/data_refresh_signal.json")
+_CACHE_BUST_STATE: dict[str, int] = {"mtime_ns": 0}
 
 
 def _market_cache_key(
@@ -104,6 +107,33 @@ def _get_market_cache_entry(key: str) -> dict[str, Any] | None:
 def _set_market_cache(key: str, data: dict[str, Any]) -> None:
     with _MARKET_CACHE_LOCK:
         _MARKET_CACHE[key] = {"ts": time.time(), "data": data}
+
+
+def _clear_runtime_caches() -> None:
+    with _MARKET_CACHE_LOCK:
+        _MARKET_CACHE.clear()
+        _NEWS_SUMMARY_CACHE.clear()
+        _SNAPSHOT_REFRESH_STATE.clear()
+    try:
+        app_module.clear_runtime_caches()
+    except Exception:
+        pass
+    try:
+        akshare_module.clear_runtime_caches()
+    except Exception:
+        pass
+
+
+def _apply_external_cache_bust_if_needed() -> None:
+    try:
+        st = _CACHE_BUST_SIGNAL_PATH.stat()
+    except Exception:
+        return
+    mtime_ns = int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)))
+    if mtime_ns <= int(_CACHE_BUST_STATE.get("mtime_ns", 0) or 0):
+        return
+    _clear_runtime_caches()
+    _CACHE_BUST_STATE["mtime_ns"] = mtime_ns
 
 
 def _resolve_cache_ttl(cfg: dict) -> int:
@@ -653,6 +683,7 @@ def _maybe_schedule_background_refresh(
 def _snapshot_scheduler_loop() -> None:
     while True:
         try:
+            _apply_external_cache_bust_if_needed()
             cfg = app_module.load_config("config/default.yaml")
             provider = _default_provider(cfg)
             market_sec, model_sec, model_independent_sec = _resolve_refresh_intervals(cfg)
@@ -713,6 +744,7 @@ def health() -> dict:
 
 @app.on_event("startup")
 def on_startup() -> None:
+    _apply_external_cache_bust_if_needed()
     _start_snapshot_scheduler()
 
 
@@ -727,6 +759,7 @@ def get_market(
     model_independent: bool = Query(False),
     model_sector: str | None = Query(None),
 ) -> dict:
+    _apply_external_cache_bust_if_needed()
     _start_snapshot_scheduler()
     params, cfg, cache_key, cache_ttl = _prepare_snapshot_context(
         kind="market",
@@ -787,6 +820,7 @@ def get_model_top(
     model_independent: bool = Query(False),
     model_sector: str | None = Query(None),
 ) -> dict:
+    _apply_external_cache_bust_if_needed()
     _start_snapshot_scheduler()
     params, cfg, cache_key, cache_ttl = _prepare_snapshot_context(
         kind="model_top",

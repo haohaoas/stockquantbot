@@ -181,6 +181,16 @@ _UNIVERSE_NAME_CACHE: dict[str, dict[str, str]] = {}
 _MANUAL_UNIVERSE_CACHE: dict[str, list[str]] = {}
 
 
+def clear_runtime_caches() -> None:
+    _MODEL_SCORE_CACHE["key"] = ""
+    _MODEL_SCORE_CACHE["ts"] = 0.0
+    _MODEL_SCORE_CACHE["scores"] = None
+    _UNIVERSE_NAME_CACHE.clear()
+    _MANUAL_UNIVERSE_CACHE.clear()
+    _HOT_SECTOR_CACHE["ts"] = 0.0
+    _HOT_SECTOR_CACHE["sectors"] = []
+
+
 def _model_cache_get(key: str, ttl_sec: int) -> pd.Series | None:
     if not key:
         return None

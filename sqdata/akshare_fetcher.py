@@ -23,6 +23,13 @@ _MANUAL_HIST_LOCK = threading.Lock()
 _MANUAL_HIST_MAX = 512
 
 
+def clear_runtime_caches() -> None:
+    with _HIST_MEM_LOCK:
+        _HIST_MEM_CACHE.clear()
+    with _MANUAL_HIST_LOCK:
+        _MANUAL_HIST_CACHE.clear()
+
+
 def _hist_mem_get(key: str, ttl_sec: int) -> pd.DataFrame | None:
     if ttl_sec <= 0:
         return None
