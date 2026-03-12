@@ -303,17 +303,22 @@ def _get_model_options(cfg: dict) -> dict[str, Any]:
     options = model_ref_cfg.get("options") or {}
 
     items: list[dict[str, str]] = []
-    if default_path and os.path.exists(default_path):
-        items.append({"key": "", "label": "default", "path": default_path})
-    else:
-        # Keep default selectable to avoid empty UI, even if path is missing.
-        items.append({"key": "", "label": "default", "path": default_path})
-
+    default_matched = False
     for key in sorted(options.keys()):
         path = str(options.get(key) or "")
         if not path or not os.path.exists(path):
             continue
+        if default_path and path == default_path:
+            default_matched = True
         items.append({"key": str(key), "label": str(key), "path": path})
+
+    if not items:
+        items.append({"key": "", "label": "default", "path": default_path})
+    elif default_path and not default_matched and os.path.exists(default_path):
+        items.insert(0, {"key": "", "label": "default", "path": default_path})
+    elif default_path and not default_matched:
+        # Keep default selectable to avoid empty UI, even if path is missing.
+        items.insert(0, {"key": "", "label": "default", "path": default_path})
 
     return {
         "default_path": default_path,

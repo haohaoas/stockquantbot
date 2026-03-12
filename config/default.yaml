@@ -82,7 +82,8 @@ signals:
     candidate_max_symbols: 3193
     minute_max_symbols: 300
     options:
-      minute_v1: ./models/lightgbm_fd5_excess_y3_q90q10_shortv3_k3_norefit.json
+      day1: ./models/lightgbm_fd1_excess_y3_q90q10_shortv3_k3_norefit.json
+      week5: ./models/lightgbm_fd5_excess_y3_q90q10_shortv3_k3_norefit.json
     filter_enabled: false
     min_score: 0.6
     show_min: 0.7
