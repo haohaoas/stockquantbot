@@ -234,6 +234,7 @@
           </div>
           <div class="note" v-if="!isWatchlist">右键任意行添加到自选</div>
           <div v-if="modelLoading" class="muted">模型候选刷新中...</div>
+          <div v-else-if="modelWarmupPending" class="muted">模型榜单预热中，稍后自动补齐...</div>
           <div v-else-if="modelTop.length === 0" class="muted">暂无模型结果</div>
           <ul v-else class="list">
             <li v-for="row in modelTop" :key="row.symbol" @contextmenu.prevent="openContextMenu($event, row.symbol)">
@@ -430,6 +431,7 @@ let refreshAbortController = null
 let refreshRequestSeq = 0
 let modelAbortController = null
 let modelRequestSeq = 0
+let modelWarmupRetryTimer = null
 const apiOrigin = (() => {
   const envBase = String(import.meta.env.VITE_API_BASE || '').trim().replace(/\/+$/, '')
   if (envBase) return envBase
@@ -461,6 +463,14 @@ const perfLabel = computed(() => {
   const model = Number(s.time_model_ms) || 0
   const score = Number(s.time_score_ms) || 0
   return `耗时 ${Math.round(total)}ms (行情${Math.round(spot)} 因子${Math.round(factors)} 模型${Math.round(model)} 评分${Math.round(score)})`
+})
+
+const modelWarmupPending = computed(() => {
+  if (modelLoading.value || modelTop.value.length > 0) return false
+  return (notes.value || []).some((note) => {
+    const text = String(note || '')
+    return text.includes('模型榜单首次生成中') || text.includes('后台刷新中') || text.includes('后台刷新已触发')
+  })
 })
 
 const cardOperations = computed(() => {
@@ -726,6 +736,7 @@ async function refreshNow() {
     stats.value = data.stats || {}
     marketOpen.value = data.market_open
     serverTime.value = data.server_time || ''
+    scheduleModelWarmupRetry(data)
   }
 
   const fetchMarketPayload = async (signal, modelIndependentFlag) => {
@@ -819,8 +830,11 @@ async function refreshModelTop() {
 
   const applyModelPayload = (data) => {
     modelTop.value = data.model_top || []
+    notes.value = data.notes || []
+    stats.value = data.stats || {}
     marketOpen.value = data.market_open
     serverTime.value = data.server_time || ''
+    scheduleModelWarmupRetry(data)
   }
 
   const fetchModelPayload = async (signal, modelIndependentFlag) => {
@@ -874,6 +888,33 @@ async function refreshModelTop() {
       modelLoading.value = false
     }
   }
+}
+
+function clearModelWarmupRetry() {
+  if (modelWarmupRetryTimer) {
+    clearTimeout(modelWarmupRetryTimer)
+    modelWarmupRetryTimer = null
+  }
+}
+
+function shouldRetryModelWarmup(data) {
+  if (!modelIndependent.value) return false
+  const items = Array.isArray(data?.model_top) ? data.model_top : []
+  if (items.length > 0) return false
+  const hintNotes = Array.isArray(data?.notes) ? data.notes : []
+  return hintNotes.some((note) => {
+    const text = String(note || '')
+    return text.includes('模型榜单首次生成中') || text.includes('后台刷新中') || text.includes('后台刷新已触发')
+  })
+}
+
+function scheduleModelWarmupRetry(data) {
+  clearModelWarmupRetry()
+  if (!shouldRetryModelWarmup(data)) return
+  modelWarmupRetryTimer = setTimeout(() => {
+    if (viewPage.value !== 'market' || modelLoading.value || loading.value || !modelIndependent.value) return
+    refreshModelTop()
+  }, 3000)
 }
 
 function getTodayCNDate() {
@@ -1085,6 +1126,7 @@ onUnmounted(() => {
     clearInterval(refreshTimer)
     refreshTimer = null
   }
+  clearModelWarmupRetry()
   if (refreshAbortController) {
     refreshAbortController.abort()
     refreshAbortController = null
