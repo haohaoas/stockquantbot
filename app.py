@@ -2049,12 +2049,22 @@ def refresh_realtime_for_view(
 
     if spot is not None and not spot.empty:
         spot = spot.set_index("symbol")
-        for col in ["close", "pct_chg", "pct_source"]:
-            if col in spot.columns and col in out.columns:
-                out.loc[out["symbol"].isin(spot.index), col] = out["symbol"].map(spot[col])
-        if "pct_source" in out.columns:
-            out.loc[out["symbol"].isin(spot.index), "pct_source"] = "spot"
-        return out
+        valid_close = pd.to_numeric(spot.get("close"), errors="coerce") > 0
+        valid_pct = pd.to_numeric(spot.get("pct_chg"), errors="coerce").notna()
+        valid_symbols = set(spot.index[valid_close | valid_pct].astype(str))
+        if valid_symbols:
+            valid_index = out["symbol"].astype(str).isin(valid_symbols)
+            if "close" in spot.columns and "close" in out.columns:
+                mapped_close = out["symbol"].map(spot["close"])
+                close_ok = pd.to_numeric(mapped_close, errors="coerce") > 0
+                out.loc[valid_index & close_ok, "close"] = mapped_close[valid_index & close_ok]
+            if "pct_chg" in spot.columns and "pct_chg" in out.columns:
+                mapped_pct = out["symbol"].map(spot["pct_chg"])
+                pct_ok = pd.to_numeric(mapped_pct, errors="coerce").notna()
+                out.loc[valid_index & pct_ok, "pct_chg"] = mapped_pct[valid_index & pct_ok]
+            if "pct_source" in out.columns:
+                out.loc[valid_index, "pct_source"] = "spot"
+            return out
 
     try:
         realtime = get_realtime(",".join(symbols), provider=provider, use_proxy=use_proxy, proxy=proxy)
