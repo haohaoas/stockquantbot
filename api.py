@@ -705,7 +705,7 @@ def get_market(
     model_sector: str | None = Query(None),
 ) -> dict:
     _start_snapshot_scheduler()
-    _, cfg, cache_key, cache_ttl = _prepare_snapshot_context(
+    params, cfg, cache_key, cache_ttl = _prepare_snapshot_context(
         kind="market",
         mode=mode,
         top_n=top_n,
@@ -765,7 +765,7 @@ def get_model_top(
     model_sector: str | None = Query(None),
 ) -> dict:
     _start_snapshot_scheduler()
-    _, cfg, cache_key, cache_ttl = _prepare_snapshot_context(
+    params, cfg, cache_key, cache_ttl = _prepare_snapshot_context(
         kind="model_top",
         mode=mode,
         top_n=top_n,
