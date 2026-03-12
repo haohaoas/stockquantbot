@@ -2037,33 +2037,42 @@ def refresh_realtime_for_view(
     if not symbols:
         return out
 
-    try:
-        spot = fetch_a_share_daily_panel(
-            signals_cfg={"symbols": symbols, "realtime_provider": provider},
-            use_proxy=use_proxy,
-            proxy=proxy,
-            allow_eastmoney_fallback=False,
-        )
-    except Exception:
-        spot = pd.DataFrame()
+    def _apply_valid_spot(spot_df: pd.DataFrame, source: str) -> bool:
+        if spot_df is None or spot_df.empty:
+            return False
+        local_spot = spot_df.set_index("symbol")
+        valid_close = pd.to_numeric(local_spot.get("close"), errors="coerce") > 0
+        valid_pct = pd.to_numeric(local_spot.get("pct_chg"), errors="coerce").notna()
+        valid_symbols = set(local_spot.index[valid_close | valid_pct].astype(str))
+        if not valid_symbols:
+            return False
+        valid_index = out["symbol"].astype(str).isin(valid_symbols)
+        if "close" in local_spot.columns and "close" in out.columns:
+            mapped_close = out["symbol"].map(local_spot["close"])
+            close_ok = pd.to_numeric(mapped_close, errors="coerce") > 0
+            out.loc[valid_index & close_ok, "close"] = mapped_close[valid_index & close_ok]
+        if "pct_chg" in local_spot.columns and "pct_chg" in out.columns:
+            mapped_pct = out["symbol"].map(local_spot["pct_chg"])
+            pct_ok = pd.to_numeric(mapped_pct, errors="coerce").notna()
+            out.loc[valid_index & pct_ok, "pct_chg"] = mapped_pct[valid_index & pct_ok]
+        if "pct_source" in out.columns:
+            out.loc[valid_index, "pct_source"] = source
+        return True
 
-    if spot is not None and not spot.empty:
-        spot = spot.set_index("symbol")
-        valid_close = pd.to_numeric(spot.get("close"), errors="coerce") > 0
-        valid_pct = pd.to_numeric(spot.get("pct_chg"), errors="coerce").notna()
-        valid_symbols = set(spot.index[valid_close | valid_pct].astype(str))
-        if valid_symbols:
-            valid_index = out["symbol"].astype(str).isin(valid_symbols)
-            if "close" in spot.columns and "close" in out.columns:
-                mapped_close = out["symbol"].map(spot["close"])
-                close_ok = pd.to_numeric(mapped_close, errors="coerce") > 0
-                out.loc[valid_index & close_ok, "close"] = mapped_close[valid_index & close_ok]
-            if "pct_chg" in spot.columns and "pct_chg" in out.columns:
-                mapped_pct = out["symbol"].map(spot["pct_chg"])
-                pct_ok = pd.to_numeric(mapped_pct, errors="coerce").notna()
-                out.loc[valid_index & pct_ok, "pct_chg"] = mapped_pct[valid_index & pct_ok]
-            if "pct_source" in out.columns:
-                out.loc[valid_index, "pct_source"] = "spot"
+    providers = [provider]
+    if provider and provider != "tencent":
+        providers.append("tencent")
+    for active_provider in providers:
+        try:
+            spot = fetch_a_share_daily_panel(
+                signals_cfg={"symbols": symbols, "realtime_provider": active_provider},
+                use_proxy=use_proxy,
+                proxy=proxy,
+                allow_eastmoney_fallback=False,
+            )
+        except Exception:
+            spot = pd.DataFrame()
+        if _apply_valid_spot(spot, "spot" if active_provider == provider else f"spot:{active_provider}"):
             return out
 
     try:
