@@ -208,15 +208,24 @@ def _post_refresh_prewarm(
             f"{base}/api/model-top?mode=all&provider={provider}&top_n=20{q_model}&model_independent=true"
         )
 
-    for url in urls:
+    def _hit(url: str) -> bool:
         try:
             resp = session.get(url, timeout=max(5, int(timeout)))
-            if resp.ok:
-                ok += 1
-            else:
-                fail += 1
+            return bool(resp.ok)
         except Exception:
-            fail += 1
+            return False
+
+    max_workers = min(6, max(1, len(urls)))
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = [ex.submit(_hit, url) for url in urls]
+        for fut in as_completed(futures):
+            try:
+                if fut.result():
+                    ok += 1
+                else:
+                    fail += 1
+            except Exception:
+                fail += 1
     return ok, fail
 
 
