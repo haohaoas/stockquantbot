@@ -2052,6 +2052,8 @@ def refresh_realtime_for_view(
         for col in ["close", "pct_chg", "pct_source"]:
             if col in spot.columns and col in out.columns:
                 out.loc[out["symbol"].isin(spot.index), col] = out["symbol"].map(spot[col])
+        if "pct_source" in out.columns:
+            out.loc[out["symbol"].isin(spot.index), "pct_source"] = "spot"
         return out
 
     try:
