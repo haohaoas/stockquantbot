@@ -422,6 +422,7 @@ def get_model_top(
     model_sector: str | None = Query(None),
 ) -> dict:
     params, cfg = _build_params(mode, top_n, intraday, model, provider, model_independent, model_sector)
+    params["model_top_only"] = True
 
     now_cn = dt.datetime.now(tz=ZoneInfo("Asia/Shanghai"))
     trade_calendar_file = str(cfg.get("trade_calendar_file", "./data/trade_calendar.csv"))

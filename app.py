@@ -257,6 +257,269 @@ def _load_manual_last_quote(manual_hist_dir: str, symbol: str) -> tuple[float, f
     return close, pct
 
 
+def _to_symbol_list(val) -> list[str]:
+    if isinstance(val, str):
+        return [s.strip().zfill(6) for s in val.split(",") if str(s).strip()]
+    if isinstance(val, list):
+        return [str(s).strip().zfill(6) for s in val if str(s).strip()]
+    return []
+
+
+def _build_model_top_rows(
+    score: pd.Series,
+    *,
+    top_n: int,
+    universe_file: str,
+    manual_hist_dir: str,
+    sector_mapping: dict[str, str] | None = None,
+    factors_rule: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    if score is None or score.empty:
+        return pd.DataFrame()
+    top_scores = score.sort_values(ascending=False).head(top_n)
+    name_map = _load_universe_name_map(universe_file)
+    fr = (
+        factors_rule.set_index("symbol")
+        if factors_rule is not None and not factors_rule.empty and "symbol" in factors_rule.columns
+        else pd.DataFrame()
+    )
+    model_rows = []
+    for sym, sc in top_scores.items():
+        sym = str(sym).zfill(6)
+        name = name_map.get(sym, "")
+        close = float("nan")
+        pct = float("nan")
+        pct_source = "hist"
+        if not fr.empty and sym in fr.index:
+            rr = fr.loc[sym]
+            if isinstance(rr, pd.DataFrame):
+                rr = rr.iloc[0]
+            name = str(rr.get("name", name) or name)
+            close = float(pd.to_numeric(rr.get("close", float("nan")), errors="coerce"))
+            pct = float(pd.to_numeric(rr.get("pct_chg", float("nan")), errors="coerce"))
+            pct_source = str(rr.get("pct_source", "spot") or "spot")
+        if not (close == close and close > 0):
+            close, pct_hist = _load_manual_last_quote(manual_hist_dir, sym)
+            if not (pct == pct):
+                pct = pct_hist
+            pct_source = "hist"
+        sec = sector_mapping.get(sym, "") if sector_mapping else ""
+        model_rows.append(
+            {
+                "symbol": sym,
+                "name": name,
+                "sector": sec,
+                "model_score": float(sc),
+                "close": close,
+                "pct_chg": pct,
+                "pct_source": pct_source,
+            }
+        )
+    return pd.DataFrame(model_rows)
+
+
+def _compute_model_top_fast(
+    *,
+    trade_date: str,
+    params: dict,
+    signals_cfg: dict,
+    notes: list[str],
+    stats: dict,
+    idx_hist: pd.DataFrame | None,
+    universe_file: str,
+    manual_hist_dir: str,
+    model_ref_cfg: dict,
+    model_ref_path: str,
+    model_candidate_mode: str,
+    model_candidate_max_symbols: int,
+    model_sector_filter: str,
+    news_cfg: dict,
+    sector_cfg: dict,
+    is_watchlist: bool,
+    preselect_cached_symbols: list[str] | None = None,
+    factors_rule: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    t_model = time.time()
+    m = load_ref_model(model_ref_path)
+    if not m:
+        notes.append("模型参考分不可用（模型文件缺失或加载失败）。")
+        stats["time_model_ms"] = round((time.time() - t_model) * 1000, 2)
+        return pd.DataFrame()
+
+    model_task = str((m.get("meta") or {}).get("task", "")).strip().lower()
+    is_minute_model = model_task == "minute_cls"
+    sector_map_file = str(sector_cfg.get("map_file", "./data/sector_map.csv"))
+    sector_mapping = load_sector_map(sector_map_file)
+
+    symbols_for_model: list[str] = []
+    if is_watchlist:
+        symbols_for_model = sorted(set(_to_symbol_list(signals_cfg.get("symbols"))))
+        notes.append(f"模型榜单快路径(自选): {len(symbols_for_model)}")
+    elif preselect_cached_symbols is not None:
+        symbols_for_model = sorted(set(str(s).zfill(6) for s in preselect_cached_symbols if str(s).strip()))
+        notes.append(f"模型榜单快路径(预选缓存): {len(symbols_for_model)}")
+    elif model_candidate_mode == "amount_topn":
+        notes.append("模型榜单快路径不支持 amount_topn，已跳过。")
+        stats["time_model_ms"] = round((time.time() - t_model) * 1000, 2)
+        return pd.DataFrame()
+    else:
+        symbols_for_model = _list_manual_hist_symbols(manual_hist_dir)
+        before_candidate = len(symbols_for_model)
+        market_scope = params.get("market_scope", ["sh", "sz"])
+        symbols_for_model = filter_symbols_by_market(symbols_for_model, market_scope)
+        symbols_for_model = filter_symbols_by_board(
+            symbols_for_model,
+            exclude_star=bool(params.get("exclude_star", False)),
+            exclude_chi_next=bool(params.get("exclude_chi_next", False)),
+            mainboard_only=bool(params.get("mainboard_only", False)),
+        )
+        st_removed = 0
+        universe_cfg = params.get("universe", {}) or {}
+        if bool(universe_cfg.get("exclude_st", True)):
+            name_map = _load_universe_name_map(universe_file)
+            filtered = []
+            for s in symbols_for_model:
+                nm = str(name_map.get(str(s).zfill(6), "") or "")
+                if re.search(r"ST|\*ST|退", nm):
+                    st_removed += 1
+                    continue
+                filtered.append(s)
+            symbols_for_model = filtered
+        if model_candidate_max_symbols > 0:
+            symbols_for_model = symbols_for_model[:model_candidate_max_symbols]
+        notes.append(
+            f"模型榜单快路径(回测同池): {len(symbols_for_model)} "
+            f"(raw={before_candidate}, st_removed={st_removed})"
+        )
+
+    minute_model_max_symbols = int(model_ref_cfg.get("minute_max_symbols", 0) or 0)
+    if is_minute_model and minute_model_max_symbols > 0 and len(symbols_for_model) > minute_model_max_symbols:
+        symbols_for_model = symbols_for_model[:minute_model_max_symbols]
+        notes.append(f"分钟模型候选限流: {len(symbols_for_model)} (max={minute_model_max_symbols})")
+
+    if model_sector_filter and symbols_for_model:
+        kws = _parse_sector_keywords(model_sector_filter)
+        kws = _expand_sector_keywords(kws, news_cfg.get("hot_sector_aliases", {}) or {})
+        if kws and sector_mapping:
+            before = len(symbols_for_model)
+            filtered_syms = []
+            for sym in symbols_for_model:
+                sym6 = str(sym).zfill(6)
+                if _is_target_sector(sector_mapping.get(sym6, ""), kws):
+                    filtered_syms.append(sym6)
+            symbols_for_model = filtered_syms
+            notes.append(f"模型板块过滤: {len(symbols_for_model)}/{before}")
+        elif kws and not sector_mapping:
+            notes.append("模型板块过滤: 板块映射缺失，已跳过。")
+
+    if not symbols_for_model:
+        notes.append("模型榜单候选为空。")
+        stats["time_model_ms"] = round((time.time() - t_model) * 1000, 2)
+        return pd.DataFrame()
+
+    model_cache_enabled = bool(model_ref_cfg.get("cache_enabled", True))
+    model_cache_ttl_sec = int(model_ref_cfg.get("cache_ttl_sec", 0))
+    model_cache_dir = str(model_ref_cfg.get("cache_dir", "./cache/model_scores"))
+    cache_key = f"{Path(model_ref_path).stem}_{trade_date}"
+    cache_path = str(Path(model_cache_dir) / f"{cache_key}.csv")
+    try:
+        minute_model_cache_ttl_sec = int(signals_cfg.get("minute_model_cache_ttl_sec", 90))
+    except Exception:
+        minute_model_cache_ttl_sec = 90
+    effective_model_cache_ttl = minute_model_cache_ttl_sec if is_minute_model else model_cache_ttl_sec
+
+    cached_scores = None
+    if model_cache_enabled and effective_model_cache_ttl > 0:
+        cached_scores = _model_cache_get(cache_key, effective_model_cache_ttl)
+        if cached_scores is None and not is_minute_model:
+            cached_scores = _load_model_score_cache(cache_path, effective_model_cache_ttl)
+            if cached_scores is not None:
+                _model_cache_set(cache_key, cached_scores)
+        if is_minute_model:
+            notes.append(f"分钟模型缓存: {effective_model_cache_ttl}s")
+    elif is_minute_model:
+        notes.append("分钟模型缓存: 关闭")
+
+    missing_syms = []
+    if cached_scores is not None and symbols_for_model:
+        missing_syms = [s for s in symbols_for_model if s not in cached_scores.index]
+        if missing_syms:
+            notes.append(f"模型分缓存命中: {len(symbols_for_model) - len(missing_syms)}/{len(symbols_for_model)}，补算 {len(missing_syms)}")
+        else:
+            notes.append(f"模型分缓存命中: {len(symbols_for_model)}")
+
+    score = None
+    if cached_scores is None or missing_syms:
+        model_signals_cfg = dict(signals_cfg)
+        target_syms = missing_syms if missing_syms else symbols_for_model
+        fast_workers = int(model_ref_cfg.get("fast_max_workers", 24) or 24)
+        current_workers = int(model_signals_cfg.get("max_workers", 8) or 8)
+        if current_workers < fast_workers:
+            model_signals_cfg["max_workers"] = fast_workers
+        if m:
+            if model_task == "minute_cls":
+                if len(target_syms) > 120 and not bool(model_signals_cfg.get("minute_live_only_missing_today", False)):
+                    model_signals_cfg["minute_live_only_missing_today"] = True
+                    notes.append("分钟模型提速: 仅补齐缺失当日分钟线")
+                live_cap = int(model_signals_cfg.get("minute_live_max_symbols", 0) or 0)
+                if len(target_syms) > 120 and (live_cap <= 0 or live_cap > 200):
+                    model_signals_cfg["minute_live_max_symbols"] = 200
+                    notes.append("分钟模型提速: 实时拉取上限=200")
+                model_feats = build_minute_ref_features(
+                    target_syms,
+                    m,
+                    model_signals_cfg,
+                    trade_date=trade_date,
+                )
+            else:
+                model_feature_set = str((m.get("meta") or {}).get("feature_set") or "").strip().lower()
+                if model_feature_set:
+                    model_signals_cfg["feature_set"] = model_feature_set
+                model_feats = build_ref_features(
+                    target_syms,
+                    trade_date,
+                    model_signals_cfg,
+                    market_df=idx_hist,
+                    market_symbol=str(params.get("index_symbol", "000300")),
+                )
+            if not model_feats.empty:
+                score = predict_ref_score(model_feats, m)
+        if score is None:
+            notes.append("模型参考分不可用（特征缺失或异常）。")
+
+    if cached_scores is not None:
+        score_series = cached_scores.copy()
+        if isinstance(score, pd.Series) and not score.empty:
+            score_series = score_series.combine_first(score)
+            if model_cache_enabled and effective_model_cache_ttl > 0:
+                _model_cache_set(cache_key, score_series)
+                if not is_minute_model:
+                    _save_model_score_cache(cache_path, score_series)
+        score = score_series.reindex(symbols_for_model) if symbols_for_model else score_series
+    elif isinstance(score, pd.Series):
+        if model_cache_enabled and effective_model_cache_ttl > 0:
+            _model_cache_set(cache_key, score)
+            if not is_minute_model:
+                _save_model_score_cache(cache_path, score)
+
+    if isinstance(score, pd.Series) and not score.empty:
+        score.index = score.index.astype(str).str.zfill(6)
+        notes.append("模型参考分已生成（仅作参考，不参与评分）。")
+        out = _build_model_top_rows(
+            score,
+            top_n=int(params.get("top_n", 20)),
+            universe_file=universe_file,
+            manual_hist_dir=manual_hist_dir,
+            sector_mapping=sector_mapping,
+            factors_rule=factors_rule,
+        )
+        stats["time_model_ms"] = round((time.time() - t_model) * 1000, 2)
+        return out
+
+    stats["time_model_ms"] = round((time.time() - t_model) * 1000, 2)
+    return pd.DataFrame()
+
+
 def _load_model_score_cache(path: str, ttl_sec: int) -> pd.Series | None:
     p = Path(path)
     if not p.exists():
@@ -987,6 +1250,7 @@ def compute_market(params: dict) -> dict:
     model_top = pd.DataFrame()
     t_start = time.time()
     pause_signals = False
+    model_top_only = bool(params.get("model_top_only", False))
 
     def _finalize_timings() -> None:
         stats["time_total_ms"] = round((time.time() - t_start) * 1000, 2)
@@ -1076,7 +1340,7 @@ def compute_market(params: dict) -> dict:
             proxy = ""
             notes.append(f"自动检测到本地代理(ENV): {detected}")
 
-    if regime_filter_enabled and not is_watchlist:
+    if regime_filter_enabled and not is_watchlist and not model_top_only:
         try:
             idx_hist = fetch_hist(
                 index_symbol,
@@ -1095,66 +1359,68 @@ def compute_market(params: dict) -> dict:
             notes.append(f"市场状态偏弱（{index_symbol} < MA{index_ma_window}），已暂停信号。")
             pause_signals = True
 
-    market_env = str(decision_cfg.get("market_env", "") or "").strip()
-    if not market_env or market_env.lower() == "auto":
-        if idx_hist is None:
-            try:
-                idx_hist = fetch_hist(
-                    index_symbol,
-                    end_date=trade_date,
-                    hist_days=max(index_ma_window + 50, 260),
-                    use_proxy=use_proxy,
-                    proxy=proxy,
-                    allow_akshare_fallback=allow_eastmoney_fallback,
-                )
-            except Exception as e:
-                notes.append(f"市场环境识别失败: {e}")
-                idx_hist = pd.DataFrame()
-        market_env = detect_market_env(idx_hist) if idx_hist is not None else "震荡市场"
-    if market_env:
-        decision_cfg = apply_env_overrides(decision_cfg, market_env)
-        notes.append(f"市场环境: {market_env}")
+    if not model_top_only:
+        market_env = str(decision_cfg.get("market_env", "") or "").strip()
+        if not market_env or market_env.lower() == "auto":
+            if idx_hist is None:
+                try:
+                    idx_hist = fetch_hist(
+                        index_symbol,
+                        end_date=trade_date,
+                        hist_days=max(index_ma_window + 50, 260),
+                        use_proxy=use_proxy,
+                        proxy=proxy,
+                        allow_akshare_fallback=allow_eastmoney_fallback,
+                    )
+                except Exception as e:
+                    notes.append(f"市场环境识别失败: {e}")
+                    idx_hist = pd.DataFrame()
+            market_env = detect_market_env(idx_hist) if idx_hist is not None else "震荡市场"
+        if market_env:
+            decision_cfg = apply_env_overrides(decision_cfg, market_env)
+            notes.append(f"市场环境: {market_env}")
 
-    dyn_cfg = decision_cfg.get("dynamic_volatility") or {}
-    if isinstance(dyn_cfg, dict) and dyn_cfg.get("enabled"):
-        window = int(dyn_cfg.get("window", 20))
-        history = int(dyn_cfg.get("history", 20))
-        vol_ratio_info = compute_volatility_ratio(idx_hist, window=window, history=history) if idx_hist is not None else None
-        if vol_ratio_info:
-            current_vol, avg_vol, vol_ratio = vol_ratio_info
-            high_ratio = float(dyn_cfg.get("high_ratio", 1.2))
-            low_ratio = float(dyn_cfg.get("low_ratio", 0.8))
-            base_vol_min = float(decision_cfg.get("breakout_min_volume_multiple", 1.2))
-            base_breakout_th = float(decision_cfg.get("breakout_threshold", 0.015))
-            if vol_ratio > high_ratio:
-                hi = dyn_cfg.get("high") or {}
-                vol_mult = float(hi.get("vol_min_mult", 1.2))
-                th_mult = float(hi.get("breakout_threshold_mult", 1.5))
-                decision_cfg["breakout_min_volume_multiple"] = base_vol_min * vol_mult
-                decision_cfg["breakout_threshold"] = base_breakout_th * th_mult
-                if "require_volume_persistence" in hi:
-                    decision_cfg["require_volume_persistence"] = bool(hi.get("require_volume_persistence"))
-                notes.append(
-                    f"动态阈值: 高波动({vol_ratio:.2f}x) vol_min={decision_cfg['breakout_min_volume_multiple']:.2f}, "
-                    f"breakout_th={decision_cfg['breakout_threshold']:.3f}"
-                )
-            elif vol_ratio < low_ratio:
-                lo = dyn_cfg.get("low") or {}
-                vol_mult = float(lo.get("vol_min_mult", 0.8))
-                th_mult = float(lo.get("breakout_threshold_mult", 0.7))
-                decision_cfg["breakout_min_volume_multiple"] = base_vol_min * vol_mult
-                decision_cfg["breakout_threshold"] = base_breakout_th * th_mult
-                if "require_volume_persistence" in lo:
-                    decision_cfg["require_volume_persistence"] = bool(lo.get("require_volume_persistence"))
-                notes.append(
-                    f"动态阈值: 低波动({vol_ratio:.2f}x) vol_min={decision_cfg['breakout_min_volume_multiple']:.2f}, "
-                    f"breakout_th={decision_cfg['breakout_threshold']:.3f}"
-                )
-            else:
-                notes.append(f"动态阈值: 正常波动({vol_ratio:.2f}x)")
+        dyn_cfg = decision_cfg.get("dynamic_volatility") or {}
+        if isinstance(dyn_cfg, dict) and dyn_cfg.get("enabled"):
+            window = int(dyn_cfg.get("window", 20))
+            history = int(dyn_cfg.get("history", 20))
+            vol_ratio_info = compute_volatility_ratio(idx_hist, window=window, history=history) if idx_hist is not None else None
+            if vol_ratio_info:
+                current_vol, avg_vol, vol_ratio = vol_ratio_info
+                high_ratio = float(dyn_cfg.get("high_ratio", 1.2))
+                low_ratio = float(dyn_cfg.get("low_ratio", 0.8))
+                base_vol_min = float(decision_cfg.get("breakout_min_volume_multiple", 1.2))
+                base_breakout_th = float(decision_cfg.get("breakout_threshold", 0.015))
+                if vol_ratio > high_ratio:
+                    hi = dyn_cfg.get("high") or {}
+                    vol_mult = float(hi.get("vol_min_mult", 1.2))
+                    th_mult = float(hi.get("breakout_threshold_mult", 1.5))
+                    decision_cfg["breakout_min_volume_multiple"] = base_vol_min * vol_mult
+                    decision_cfg["breakout_threshold"] = base_breakout_th * th_mult
+                    if "require_volume_persistence" in hi:
+                        decision_cfg["require_volume_persistence"] = bool(hi.get("require_volume_persistence"))
+                    notes.append(
+                        f"动态阈值: 高波动({vol_ratio:.2f}x) vol_min={decision_cfg['breakout_min_volume_multiple']:.2f}, "
+                        f"breakout_th={decision_cfg['breakout_threshold']:.3f}"
+                    )
+                elif vol_ratio < low_ratio:
+                    lo = dyn_cfg.get("low") or {}
+                    vol_mult = float(lo.get("vol_min_mult", 0.8))
+                    th_mult = float(lo.get("breakout_threshold_mult", 0.7))
+                    decision_cfg["breakout_min_volume_multiple"] = base_vol_min * vol_mult
+                    decision_cfg["breakout_threshold"] = base_breakout_th * th_mult
+                    if "require_volume_persistence" in lo:
+                        decision_cfg["require_volume_persistence"] = bool(lo.get("require_volume_persistence"))
+                    notes.append(
+                        f"动态阈值: 低波动({vol_ratio:.2f}x) vol_min={decision_cfg['breakout_min_volume_multiple']:.2f}, "
+                        f"breakout_th={decision_cfg['breakout_threshold']:.3f}"
+                    )
+                else:
+                    notes.append(f"动态阈值: 正常波动({vol_ratio:.2f}x)")
 
     symbols_cfg = signals_cfg.get("symbols") or signals_cfg.get("watchlist") or signals_cfg.get("universe")
     cache_hit = False
+    preselect_cached_symbols: list[str] = []
     if (not symbols_cfg) and preselect_cache_enabled and not is_watchlist:
         cached_syms = _load_preselect_cache(
             preselect_cache_file,
@@ -1182,9 +1448,56 @@ def compute_market(params: dict) -> dict:
                 cached_for_use = cached_for_use[:preselect_n]
                 signals_cfg = dict(signals_cfg)
                 signals_cfg["symbols"] = cached_for_use
+                preselect_cached_symbols = cached_for_use[:]
                 notes.append(f"预选缓存命中: {len(cached_for_use)}")
                 cache_hit = True
                 symbols_cfg = cached_for_use
+
+    if model_top_only and model_ref_enabled and model_ref_path:
+        fast_preselect_symbols = None
+        if is_watchlist:
+            fast_preselect_symbols = None
+        elif model_candidate_mode in ("rule_shared", "shared", "rule"):
+            if preselect_cached_symbols:
+                fast_preselect_symbols = preselect_cached_symbols
+            else:
+                notes.append("模型榜单快路径未命中预选缓存，回退完整链路。")
+        elif model_candidate_mode == "amount_topn":
+            notes.append("模型榜单快路径不支持 amount_topn，回退完整链路。")
+        else:
+            fast_preselect_symbols = None
+
+        if is_watchlist or model_candidate_mode not in ("rule_shared", "shared", "rule", "amount_topn") or fast_preselect_symbols is not None:
+            model_top = _compute_model_top_fast(
+                trade_date=trade_date,
+                params=params,
+                signals_cfg=signals_cfg,
+                notes=notes,
+                stats=stats,
+                idx_hist=idx_hist,
+                universe_file=universe_file,
+                manual_hist_dir=manual_hist_dir,
+                model_ref_cfg=model_ref_cfg,
+                model_ref_path=model_ref_path,
+                model_candidate_mode=model_candidate_mode,
+                model_candidate_max_symbols=model_candidate_max_symbols,
+                model_sector_filter=model_sector_filter,
+                news_cfg=news_cfg,
+                sector_cfg=sector_cfg,
+                is_watchlist=is_watchlist,
+                preselect_cached_symbols=fast_preselect_symbols,
+                factors_rule=None,
+            )
+            notes.append("模型榜单快路径: 已跳过规则列表计算")
+            _finalize_timings()
+            return {
+                "df": pd.DataFrame(),
+                "notes": notes,
+                "stats": stats,
+                "proxy_used": chosen_proxy,
+                "use_proxy": chosen_use_proxy,
+                "model_top": model_top,
+            }
     if (not symbols_cfg) and use_universe_file:
         symbols_list = load_universe_symbols(universe_file)
         if symbols_list:
@@ -1209,7 +1522,7 @@ def compute_market(params: dict) -> dict:
     # hot_filter_* already resolved above to keep cache consistent
     hot_sectors: list[str] = []
     hot_set: set[str] = set()
-    if hot_filter_enabled and not is_watchlist:
+    if hot_filter_enabled and not is_watchlist and not model_top_only:
         try:
             cfg_stub = {"news": news_cfg, "deepseek": deepseek_cfg}
             hot_sectors = _resolve_hot_sectors(cfg_stub, use_proxy=use_proxy, proxy=proxy)
@@ -1221,7 +1534,7 @@ def compute_market(params: dict) -> dict:
             notes.append("热点板块: 未获取到有效热点（可能为空或数量不足）。")
 
     # Hot-sector prefilter: reduce universe before fetching spot.
-    if hot_filter_enabled and not is_watchlist and hot_set:
+    if hot_filter_enabled and not is_watchlist and hot_set and not model_top_only:
         symbols_cfg = signals_cfg.get("symbols") or signals_cfg.get("watchlist") or signals_cfg.get("universe")
         symbols_list = []
         if isinstance(symbols_cfg, str):
