@@ -147,6 +147,13 @@ def _resolve_cache_ttl(cfg: dict) -> int:
     return 0
 
 
+def _resolve_top_n(cfg: dict, top_n: int | None) -> int:
+    if top_n is not None:
+        return int(top_n)
+    output_cfg = (cfg or {}).get("output", {}) or {}
+    return int(output_cfg.get("top_n", 20) or 20)
+
+
 def _resolve_news_cache_ttl(cfg: dict) -> int:
     if not cfg:
         return 0
@@ -451,10 +458,11 @@ def _compute_market_snapshot(
 ) -> tuple[dict[str, Any], dict, dict, str, int]:
     params, cfg = _build_params(mode, top_n, intraday, model, provider, model_independent, model_sector)
     cache_ttl = _resolve_cache_ttl(cfg)
+    cache_top_n = _resolve_top_n(cfg, top_n)
     model_identity = _resolve_model_identity(params)
     cache_key = _market_cache_key(
         mode,
-        top_n,
+        cache_top_n,
         only_buy,
         intraday,
         model_identity,
@@ -497,10 +505,11 @@ def _compute_model_top_snapshot(
     params, cfg = _build_params(mode, top_n, intraday, model, provider, model_independent, model_sector)
     params["model_top_only"] = True
     cache_ttl = _resolve_cache_ttl(cfg)
+    cache_top_n = _resolve_top_n(cfg, top_n)
     model_identity = _resolve_model_identity(params)
     cache_key = "model_top|" + _market_cache_key(
         mode,
-        top_n,
+        cache_top_n,
         False,
         intraday,
         model_identity,
@@ -542,10 +551,11 @@ def _prepare_snapshot_context(
     if kind == "model_top":
         params["model_top_only"] = True
     cache_ttl = _resolve_cache_ttl(cfg)
+    cache_top_n = _resolve_top_n(cfg, top_n)
     model_identity = _resolve_model_identity(params)
     cache_key = _market_cache_key(
         mode,
-        top_n,
+        cache_top_n,
         only_buy if kind == "market" else False,
         intraday,
         model_identity,
