@@ -23,7 +23,7 @@ from sqdata.sector_map import apply_sector_map, load_sector_map
 from sqdata.news_sentiment import get_market_news_sentiment
 from strategy.universe import filter_universe
 from strategy.decision import apply_short_term_decision, apply_env_overrides
-from strategy.market_regime import market_regime_ok, detect_market_env, compute_volatility_ratio
+from strategy.market_regime import market_regime_ok, detect_market_env, compute_volatility_ratio, evaluate_market_filter
 from sqdata.intraday_v2 import apply_intraday_v2
 from sqdata.fetcher import get_realtime
 
@@ -1331,6 +1331,8 @@ def compute_market(params: dict) -> dict:
     weights = params.get("weights", {}) or {}
     sector_cfg = params.get("sector_boost", {}) or {}
     decision_cfg = params.get("decision", {}) or {}
+    market_filter_v2_cfg = decision_cfg.get("market_filter_v2") or {}
+    market_filter_v2_enabled = bool(market_filter_v2_cfg.get("enabled", False))
     news_cfg = params.get("news", {}) or {}
     deepseek_cfg = params.get("deepseek", {}) or {}
     model_sector_filter = str(params.get("model_sector", "") or "").strip()
@@ -1406,7 +1408,7 @@ def compute_market(params: dict) -> dict:
             proxy = ""
             notes.append(f"自动检测到本地代理(ENV): {detected}")
 
-    if regime_filter_enabled and not is_watchlist and not model_top_only:
+    if regime_filter_enabled and not market_filter_v2_enabled and not is_watchlist and not model_top_only:
         try:
             idx_hist = fetch_hist(
                 index_symbol,
@@ -1671,6 +1673,35 @@ def compute_market(params: dict) -> dict:
     if spot_source:
         notes.append(f"行情来源: {spot_source}")
         stats["spot_source"] = spot_source
+
+    if market_filter_v2_enabled and not is_watchlist and not model_top_only:
+        mf = evaluate_market_filter(
+            idx_hist,
+            spot,
+            ma_fast=int(market_filter_v2_cfg.get("ma_fast", 20) or 20),
+            ma_slow=int(market_filter_v2_cfg.get("ma_slow", 60) or 60),
+            vol_window=int(market_filter_v2_cfg.get("vol_window", 20) or 20),
+            vol_history=int(market_filter_v2_cfg.get("vol_history", 20) or 20),
+            vol_ratio_max=float(market_filter_v2_cfg.get("vol_ratio_max", 1.5) or 1.5),
+            breadth_up_ratio_min=float(market_filter_v2_cfg.get("breadth_up_ratio_min", 0.40) or 0.40),
+        )
+        trend_ok = mf.get("trend_ok")
+        vol_ok = mf.get("vol_ok")
+        breadth_ok = mf.get("breadth_ok")
+        breadth_ratio = mf.get("breadth_up_ratio")
+        vol_ratio = mf.get("vol_ratio")
+        market_filter_parts = [f"trend={trend_ok}", f"vol={vol_ok}", f"breadth={breadth_ok}"]
+        if breadth_ratio is not None:
+            market_filter_parts.append(f"up_ratio={float(breadth_ratio) * 100:.1f}%")
+        if vol_ratio is not None:
+            market_filter_parts.append(f"vol_ratio={float(vol_ratio):.2f}")
+        notes.append("市场过滤V2: " + ", ".join(market_filter_parts))
+        stats["market_filter_v2"] = mf
+        if not bool(mf.get("passed", False)):
+            block_on_fail = bool(market_filter_v2_cfg.get("block_on_fail", True))
+            if block_on_fail:
+                pause_signals = True
+                notes.append("市场过滤V2未通过，已暂停规则信号。")
 
     signals_cfg = dict(signals_cfg)
     signals_cfg["use_proxy"] = chosen_use_proxy

@@ -164,3 +164,68 @@ def compute_volatility_ratio(
         return None
     ratio = float(current_vol / avg_vol)
     return current_vol, avg_vol, ratio
+
+
+def evaluate_market_filter(
+    index_df: pd.DataFrame | None,
+    spot_df: pd.DataFrame | None,
+    *,
+    ma_fast: int = 20,
+    ma_slow: int = 60,
+    vol_window: int = 20,
+    vol_history: int = 20,
+    vol_ratio_max: float = 1.5,
+    breadth_up_ratio_min: float = 0.40,
+) -> dict[str, float | bool | None]:
+    result: dict[str, float | bool | None] = {
+        "passed": False,
+        "trend_ok": None,
+        "vol_ok": None,
+        "breadth_ok": None,
+        "index_close": None,
+        "index_ma_fast": None,
+        "index_ma_slow": None,
+        "vol_ratio": None,
+        "breadth_up_ratio": None,
+    }
+
+    trend_ok = None
+    vol_ok = None
+    breadth_ok = None
+
+    if index_df is not None and not index_df.empty and "close" in index_df.columns:
+        close = pd.to_numeric(index_df["close"], errors="coerce")
+        ma20 = close.rolling(ma_fast, min_periods=ma_fast).mean()
+        ma60 = close.rolling(ma_slow, min_periods=ma_slow).mean()
+        if not close.empty:
+            last_close = float(close.iloc[-1])
+            last_ma20 = float(ma20.iloc[-1]) if len(ma20) else float("nan")
+            last_ma60 = float(ma60.iloc[-1]) if len(ma60) else float("nan")
+            result["index_close"] = last_close if last_close == last_close else None
+            result["index_ma_fast"] = last_ma20 if last_ma20 == last_ma20 else None
+            result["index_ma_slow"] = last_ma60 if last_ma60 == last_ma60 else None
+            if last_close == last_close and last_ma20 == last_ma20 and last_ma60 == last_ma60:
+                trend_ok = bool(last_close >= last_ma20 and last_ma20 >= last_ma60)
+
+        vol_info = compute_volatility_ratio(index_df, window=vol_window, history=vol_history)
+        if vol_info is not None:
+            _, _, vol_ratio = vol_info
+            result["vol_ratio"] = float(vol_ratio)
+            vol_ok = bool(vol_ratio <= vol_ratio_max)
+
+    if spot_df is not None and not spot_df.empty and "pct_chg" in spot_df.columns:
+        pct = pd.to_numeric(spot_df["pct_chg"], errors="coerce")
+        valid = pct.notna()
+        if valid.any():
+            up_ratio = float((pct[valid] > 0).mean())
+            result["breadth_up_ratio"] = up_ratio
+            breadth_ok = bool(up_ratio >= breadth_up_ratio_min)
+
+    result["trend_ok"] = trend_ok
+    result["vol_ok"] = vol_ok
+    result["breadth_ok"] = breadth_ok
+
+    checks = [trend_ok, vol_ok, breadth_ok]
+    if all(v is True for v in checks):
+        result["passed"] = True
+    return result
