@@ -618,8 +618,10 @@ def _apply_profile_filters(factors: pd.DataFrame, decision_cfg: dict, notes: lis
 
     close_min = float(cfg.get("close_min", 4.0))
     close_max = float(cfg.get("close_max", 40.0))
-    pct_min = float(cfg.get("pct_min", 2.0))
-    pct_max = float(cfg.get("pct_max", 6.0))
+    pct_min_raw = cfg.get("pct_min", None)
+    pct_max_raw = cfg.get("pct_max", 6.0)
+    pct_min = float(pct_min_raw) if pct_min_raw not in (None, "") else None
+    pct_max = float(pct_max_raw) if pct_max_raw not in (None, "") else None
     require_upper_wick_gt_body = bool(cfg.get("upper_wick_gt_body", True))
     require_shrink_up = bool(cfg.get("require_shrink_up", True))
     shrink_vol_ratio_max = float(cfg.get("shrink_vol_ratio_max", 1.0))
@@ -636,7 +638,10 @@ def _apply_profile_filters(factors: pd.DataFrame, decision_cfg: dict, notes: lis
         mask &= (c >= close_min) & (c <= close_max)
     if "pct_chg" in out.columns:
         p = pd.to_numeric(out["pct_chg"], errors="coerce")
-        mask &= (p >= pct_min) & (p <= pct_max)
+        if pct_min is not None:
+            mask &= p >= pct_min
+        if pct_max is not None:
+            mask &= p <= pct_max
     if require_upper_wick_gt_body and "upper_wick" in out.columns and "body" in out.columns:
         uw = pd.to_numeric(out["upper_wick"], errors="coerce")
         bd = pd.to_numeric(out["body"], errors="coerce").abs()
