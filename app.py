@@ -683,6 +683,35 @@ def _apply_profile_filters(factors: pd.DataFrame, decision_cfg: dict, notes: lis
     return filtered
 
 
+def _sanitize_factor_frame(factors: pd.DataFrame, notes: list[str], *, stage: str) -> pd.DataFrame:
+    if factors is None or factors.empty:
+        return factors
+
+    out = factors.copy()
+
+    dup_cols = out.columns[out.columns.duplicated()].tolist()
+    if dup_cols:
+        out = out.loc[:, ~out.columns.duplicated(keep="last")].copy()
+        joined = ",".join(dict.fromkeys(str(x) for x in dup_cols))
+        notes.append(f"{stage}: 已移除重复列 {joined}")
+
+    if out.index.has_duplicates:
+        dup_count = int(out.index.duplicated().sum())
+        out = out.reset_index(drop=True)
+        notes.append(f"{stage}: 已重置重复索引 {dup_count}")
+
+    if "symbol" in out.columns:
+        sym = out["symbol"].astype(str).str.zfill(6)
+        dup_mask = sym.duplicated(keep="first")
+        dup_count = int(dup_mask.sum())
+        if dup_count > 0:
+            out = out.loc[~dup_mask].copy()
+            notes.append(f"{stage}: 已去重重复股票 {dup_count}")
+        out["symbol"] = sym
+
+    return out.reset_index(drop=True)
+
+
 def _preselect_by_amount(spot: pd.DataFrame, top_n: int) -> pd.DataFrame:
     if spot is None or spot.empty:
         return spot
@@ -1691,6 +1720,7 @@ def compute_market(params: dict) -> dict:
         factors_rule = build_factors(spot_rule, signals_cfg, trade_date, stats=stats)
         if factors_rule is not None and not factors_rule.empty:
             factors_rule["symbol"] = factors_rule["symbol"].astype(str).str.zfill(6)
+            factors_rule = _sanitize_factor_frame(factors_rule, notes, stage="因子清洗")
         stats["time_factors_ms"] = round((time.time() - t_factors) * 1000, 2)
         if model_ref_enabled and model_ref_path:
             t_model = time.time()
@@ -1847,6 +1877,7 @@ def compute_market(params: dict) -> dict:
                         right_index=True,
                         how="left",
                     )
+                    factors_rule = _sanitize_factor_frame(factors_rule, notes, stage="模型合并清洗")
                 notes.append("模型参考分已生成（仅作参考，不参与评分）。")
                 top_scores = score.sort_values(ascending=False).head(top_n)
                 name_map = _load_universe_name_map(universe_file)
@@ -1892,6 +1923,7 @@ def compute_market(params: dict) -> dict:
         if pause_signals:
             ranked_full = pd.DataFrame()
         else:
+            factors_rule = _sanitize_factor_frame(factors_rule, notes, stage="评分前清洗")
             factors_for_rule = _apply_profile_filters(factors_rule, decision_cfg, notes)
             if sector_cfg.get("enabled"):
                 map_file = str(sector_cfg.get("map_file", "./data/sector_map.csv"))
