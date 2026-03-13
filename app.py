@@ -192,6 +192,22 @@ def clear_runtime_caches() -> None:
     _HOT_SECTOR_CACHE["sectors"] = []
 
 
+def _normalize_model_score_series(scores: pd.Series | None) -> pd.Series | None:
+    if scores is None:
+        return None
+    ser = pd.Series(scores).copy()
+    if ser.empty:
+        return ser
+    ser.index = ser.index.astype(str).str.zfill(6)
+    ser = pd.to_numeric(ser, errors="coerce")
+    ser = ser[ser.notna()]
+    if ser.empty:
+        return ser
+    if ser.index.has_duplicates:
+        ser = ser.groupby(level=0, sort=False).last()
+    return ser
+
+
 def _model_cache_get(key: str, ttl_sec: int) -> pd.Series | None:
     if not key:
         return None
@@ -202,12 +218,15 @@ def _model_cache_get(key: str, ttl_sec: int) -> pd.Series | None:
         return None
     scores = _MODEL_SCORE_CACHE.get("scores")
     if isinstance(scores, pd.Series) and not scores.empty:
-        return scores.copy()
+        return _normalize_model_score_series(scores)
     return None
 
 
 def _model_cache_set(key: str, scores: pd.Series) -> None:
     if not key or scores is None or scores.empty:
+        return
+    scores = _normalize_model_score_series(scores)
+    if scores is None or scores.empty:
         return
     _MODEL_SCORE_CACHE["key"] = key
     _MODEL_SCORE_CACHE["ts"] = time.time()
@@ -549,11 +568,13 @@ def _load_model_score_cache(path: str, ttl_sec: int) -> pd.Series | None:
     if "symbol" not in df.columns or "model_score" not in df.columns:
         return None
     ser = df.set_index("symbol")["model_score"]
-    ser.index = ser.index.astype(str).str.zfill(6)
-    return ser
+    return _normalize_model_score_series(ser)
 
 
 def _save_model_score_cache(path: str, scores: pd.Series) -> None:
+    if scores is None or scores.empty:
+        return
+    scores = _normalize_model_score_series(scores)
     if scores is None or scores.empty:
         return
     p = Path(path)
