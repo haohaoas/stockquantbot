@@ -189,6 +189,7 @@ def build_factors(
         ma60 = ma60_series.iloc[-1]
         ma10 = ma10_series.iloc[-1]
         ma30 = ma30_series.iloc[-1]
+        ma60_prev = float(ma60_series.iloc[-2]) if len(ma60_series) >= 2 else float("nan")
 
         # Breakout: close >= HHV(lookback)
         hhv20 = hhv(close, lookback_hhv).iloc[-1]
@@ -247,6 +248,7 @@ def build_factors(
 
         # RSI / MACD
         rsi_val = float(rsi(close, rsi_window).iloc[-1]) if len(close) >= rsi_window else float("nan")
+        rsi_prev = float(rsi(close, rsi_window).iloc[-2]) if len(close) >= (rsi_window + 1) else float("nan")
         rsi6 = float(rsi(close, 6).iloc[-1]) if len(close) >= 6 else float("nan")
         rsi24 = float(rsi(close, 24).iloc[-1]) if len(close) >= 24 else float("nan")
         macd_line, macd_signal_line, macd_hist = macd(close, macd_fast, macd_slow, macd_signal)
@@ -378,6 +380,8 @@ def build_factors(
         body = float("nan")
         upper_wick = float("nan")
         lower_wick = float("nan")
+        lower_wick_ratio = float("nan")
+        bullish_engulfing = 0.0
         open_last = float("nan")
         if "open" in hist.columns and "high" in hist.columns and "low" in hist.columns and len(hist) > 0:
             open_last = float(hist["open"].iloc[-1])
@@ -387,6 +391,19 @@ def build_factors(
                 body = (last_close - open_last) / open_last
                 upper_wick = (high_last - max(open_last, last_close)) / open_last
                 lower_wick = (min(open_last, last_close) - low_last) / open_last
+                candle_span = max(high_last - low_last, 0.0)
+                if candle_span > 0:
+                    lower_wick_ratio = float((min(open_last, last_close) - low_last) / candle_span)
+            if len(hist) >= 2:
+                prev_open = float(hist["open"].iloc[-2])
+                prev_close_c = float(hist["close"].iloc[-2])
+                prev_body_down = prev_close_c < prev_open
+                curr_body_up = last_close > open_last
+                if prev_body_down and curr_body_up and open_last <= prev_close_c and last_close >= prev_open:
+                    bullish_engulfing = 1.0
+
+        rsi_rebound = 1.0 if (rsi_val == rsi_val and rsi_prev == rsi_prev and rsi_val > rsi_prev) else 0.0
+        long_lower_wick = 1.0 if (lower_wick_ratio == lower_wick_ratio and lower_wick_ratio >= 0.3) else 0.0
 
         bull_volume = float("nan")
         bear_volume = float("nan")
@@ -538,6 +555,7 @@ def build_factors(
             "ma60": float(ma60),
             "ma10": float(ma10),
             "ma30": float(ma30),
+            "ma60_prev": ma60_prev,
             "ma5_slope": ma5_slope,
             "ma10_slope": ma10_slope,
             "ma20_slope": ma20_slope,
@@ -550,6 +568,9 @@ def build_factors(
             "body": body,
             "upper_wick": upper_wick,
             "lower_wick": lower_wick,
+            "lower_wick_ratio": lower_wick_ratio,
+            "long_lower_wick": long_lower_wick,
+            "bullish_engulfing": bullish_engulfing,
             "ret_1": ret_1,
             "ret_3": ret_3,
             "ret_5": ret_5,
@@ -571,6 +592,8 @@ def build_factors(
             "atr_pct": atr_pct,
             "mdd20": float(mdd20),
             "rsi": rsi_val,
+            "rsi_prev": rsi_prev,
+            "rsi_rebound": rsi_rebound,
             "rsi_6": rsi6,
             "rsi_24": rsi24,
             "macd_line": macd_line_v,

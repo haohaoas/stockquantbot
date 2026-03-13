@@ -64,22 +64,26 @@ def _compute_path_scores(out: pd.DataFrame, weights: dict, decision_cfg: dict | 
     breakout_enabled = bool(breakout_cfg.get("enabled", True))
     breakout_vol_threshold = float(breakout_cfg.get("vol_threshold", 1.2))
     breakout_pct_min = float(breakout_cfg.get("min_pct", 1.0))
+    breakout_strength_cap = float(breakout_cfg.get("strength_cap", 0.12))
 
     pullback_enabled = bool(pullback_cfg.get("enabled", True))
     pullback_max = float(pullback_cfg.get("max_ma20_dist", 0.05))
     pullback_shrink_threshold = float(pullback_cfg.get("shrink_threshold", 0.8))
     pullback_shadow_min = float(pullback_cfg.get("lower_wick_ratio_min", 0.3))
     pullback_min_days_since_high = float(pullback_cfg.get("min_days_since_high", 3.0))
+    pullback_allow_below_ma20 = float(pullback_cfg.get("allow_below_ma20", 0.01))
 
     rebound_enabled = bool(rebound_cfg.get("enabled", True))
     rebound_bias_threshold = float(rebound_cfg.get("bias_threshold", -0.08))
     rebound_vol_max = float(rebound_cfg.get("vol_ratio_5_max", 1.2))
     rebound_rsi_max = float(rebound_cfg.get("rsi_max", 30.0))
     rebound_shadow_min = float(rebound_cfg.get("lower_wick_ratio_min", 0.35))
+    rebound_strength_cap = float(rebound_cfg.get("strength_cap", 0.15))
 
     close = _col(out, "close")
     ma20 = _col(out, "ma20")
     ma60 = _col(out, "ma60")
+    ma60_prev = _col(out, "ma60_prev", default=float("nan"))
     ma20_slope = _col(out, "ma20_slope")
     breakout = _col(out, "breakout")
     breakout_rt = _col(out, "breakout_rt", default=float("nan"))
@@ -97,37 +101,47 @@ def _compute_path_scores(out: pd.DataFrame, weights: dict, decision_cfg: dict | 
     volume_change_20d = _col(out, "volume_change_20d", default=float("nan"))
     price_ma20_dist = _col(out, "price_ma20_dist", default=float("nan"))
     rsi_val = _col(out, "rsi", default=float("nan"))
+    rsi_rebound = _col(out, "rsi_rebound", default=0.0)
     days_since_hhv = _col(out, "days_since_hhv", default=float("nan"))
     price_accel_5 = _col(out, "price_accel_5", default=float("nan"))
     price_accel_10 = _col(out, "price_accel_10", default=float("nan"))
+    lower_wick_ratio = _col(out, "lower_wick_ratio", default=float("nan"))
+    long_lower_wick = _col(out, "long_lower_wick", default=0.0)
+    bullish_engulfing = _col(out, "bullish_engulfing", default=0.0)
+    price_vs_high_20 = _col(out, "price_vs_high_20", default=float("nan"))
 
     candle_range = (body.abs() + upper_wick + lower_wick).replace(0, pd.NA)
-    lower_wick_ratio = (lower_wick / candle_range).fillna(0.0)
+    lower_wick_ratio = lower_wick_ratio.where(lower_wick_ratio == lower_wick_ratio, (lower_wick / candle_range)).fillna(0.0)
     price_up = (body > 0) | (pct_chg >= breakout_pct_min)
 
-    breakout_trend_ok = (close > ma20) & (ma20 > ma60) & (ma20_slope > 0)
+    breakout_trend_ok = (close > ma20) & (ma20 > ma60_prev.fillna(ma60)) & (ma20_slope > 0)
     breakout_vol_ok = vol_ratio_5 >= breakout_vol_threshold
-    breakout_hit = breakout_enabled & (breakout_flag >= 1.0) & breakout_vol_ok & price_up & breakout_trend_ok
+    breakout_hit = breakout_enabled & (close > breakout_level) & (breakout_flag >= 1.0) & breakout_vol_ok & price_up & breakout_trend_ok
     breakout_raw = ((close / breakout_level.replace(0, pd.NA)) - 1.0).fillna(breakout_strength).clip(lower=0.0)
     breakout_volume_boost = vol_ratio_5.clip(lower=0.0, upper=3.0) / 2.0
-    breakout_path_strength = (breakout_raw * breakout_volume_boost).where(breakout_hit, 0.0).clip(0.0, 1.0)
+    breakout_path_strength = (
+        (breakout_raw.clip(upper=breakout_strength_cap) / max(breakout_strength_cap, 1e-6)) * breakout_volume_boost
+    ).where(breakout_hit, 0.0).clip(0.0, 1.0)
 
-    pullback_trend_ok = (ma20 > ma60) & (ma20_slope > 0) & (close > ma60)
+    pullback_trend_ok = (ma20 > ma60) & (close >= ma20 * (1.0 - pullback_allow_below_ma20))
     pullback_dist_ok = price_ma20_dist.abs() <= pullback_max
     pullback_vol_ok = (vol_ratio_5 <= pullback_shrink_threshold) | (volume_change_20d < -0.1)
-    pullback_stop_ok = (lower_wick_ratio >= pullback_shadow_min) | (pct_chg >= 0)
+    pullback_stop_ok = (lower_wick_ratio >= pullback_shadow_min) | (long_lower_wick >= 1.0) | (rsi_rebound >= 1.0)
     pullback_days_ok = days_since_hhv.fillna(pullback_min_days_since_high) >= pullback_min_days_since_high
+    pullback_from_high = price_vs_high_20.fillna(1.0) < 0.995
     pullback_hit = pullback_enabled & pullback_trend_ok & pullback_dist_ok & pullback_vol_ok & pullback_stop_ok & pullback_days_ok
+    pullback_hit = pullback_hit & pullback_from_high
     pullback_proximity = (1.0 - (price_ma20_dist.abs() / max(pullback_max, 1e-6))).clip(0.0, 1.0)
-    pullback_volume_relief = (1.0 - (vol_ratio_5 / max(pullback_shrink_threshold, 1e-6))).clip(0.0, 1.0)
-    pullback_path_strength = (pullback_proximity * (0.6 + 0.4 * pullback_volume_relief)).where(pullback_hit, 0.0).clip(0.0, 1.0)
+    pullback_volume_relief = (1.0 - vol_ratio_5.clip(lower=0.0, upper=1.5) / 1.5).clip(0.0, 1.0)
+    pullback_path_strength = (pullback_proximity * (0.5 + 0.5 * pullback_volume_relief)).where(pullback_hit, 0.0).clip(0.0, 1.0)
 
     rebound_dist_ok = price_ma20_dist <= rebound_bias_threshold
     rebound_vol_ok = vol_ratio_5 <= rebound_vol_max
     rebound_rsi_ok = rsi_val <= rebound_rsi_max
-    rebound_stop_ok = (lower_wick_ratio >= rebound_shadow_min) | ((body > 0) & (pct_chg > 0))
+    rebound_stop_ok = (lower_wick_ratio >= rebound_shadow_min) | (long_lower_wick >= 1.0) | (bullish_engulfing >= 1.0)
     rebound_hit = rebound_enabled & rebound_dist_ok & rebound_vol_ok & rebound_rsi_ok & rebound_stop_ok
-    rebound_depth = (price_ma20_dist.abs() / max(abs(rebound_bias_threshold), 1e-6)).clip(0.0, 1.0)
+    rebound_depth_raw = price_ma20_dist.abs().clip(lower=0.0)
+    rebound_depth = (rebound_depth_raw.clip(upper=rebound_strength_cap) / max(rebound_strength_cap, 1e-6)).clip(0.0, 1.0)
     rebound_relief = (1.0 - (vol_ratio_5 / 2.0)).clip(0.0, 1.0)
     rebound_path_strength = (rebound_depth * rebound_relief).where(rebound_hit, 0.0).clip(0.0, 1.0)
 

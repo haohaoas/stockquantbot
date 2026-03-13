@@ -179,9 +179,11 @@ decision:
       enabled: true
       vol_threshold: 1.2
       min_pct: 1.0
+      strength_cap: 0.12
     pullback:
       enabled: true
       max_ma20_dist: 0.05
+      allow_below_ma20: 0.01
       shrink_threshold: 0.8
       lower_wick_ratio_min: 0.3
       min_days_since_high: 3
@@ -191,6 +193,7 @@ decision:
       vol_ratio_5_max: 1.2
       rsi_max: 30.0
       lower_wick_ratio_min: 0.35
+      strength_cap: 0.15
   weibi_enabled: true
   weibi_key_signal_only: true
   weibi_pos_min: 5.0
