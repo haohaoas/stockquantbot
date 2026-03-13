@@ -19,9 +19,12 @@ services:
       - ./output:/app/output
   scheduler:
     image: stockquantbot:latest
+    pull_policy: never
     container_name: stockquantbot_scheduler
     restart: unless-stopped
     command: ["python", "snapshot_worker.py"]
+    depends_on:
+      - app
     environment:
       SQB_ENABLE_SNAPSHOT_SCHEDULER: "1"
     volumes:
