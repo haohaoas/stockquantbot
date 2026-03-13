@@ -366,6 +366,7 @@ def _compute_model_top_fast(
     news_cfg: dict,
     sector_cfg: dict,
     is_watchlist: bool,
+    model_independent: bool,
     preselect_cached_symbols: list[str] | None = None,
     factors_rule: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
@@ -385,6 +386,35 @@ def _compute_model_top_fast(
     if is_watchlist:
         symbols_for_model = sorted(set(_to_symbol_list(signals_cfg.get("symbols"))))
         notes.append(f"模型榜单快路径(自选): {len(symbols_for_model)}")
+    elif model_independent:
+        symbols_for_model = _list_manual_hist_symbols(manual_hist_dir)
+        before_candidate = len(symbols_for_model)
+        market_scope = params.get("market_scope", ["sh", "sz"])
+        symbols_for_model = filter_symbols_by_market(symbols_for_model, market_scope)
+        symbols_for_model = filter_symbols_by_board(
+            symbols_for_model,
+            exclude_star=bool(params.get("exclude_star", False)),
+            exclude_chi_next=bool(params.get("exclude_chi_next", False)),
+            mainboard_only=bool(params.get("mainboard_only", False)),
+        )
+        st_removed = 0
+        universe_cfg = params.get("universe", {}) or {}
+        if bool(universe_cfg.get("exclude_st", True)):
+            name_map = _load_universe_name_map(universe_file)
+            filtered = []
+            for s in symbols_for_model:
+                nm = str(name_map.get(str(s).zfill(6), "") or "")
+                if re.search(r"ST|\*ST|退", nm):
+                    st_removed += 1
+                    continue
+                filtered.append(s)
+            symbols_for_model = filtered
+        if model_candidate_max_symbols > 0:
+            symbols_for_model = symbols_for_model[:model_candidate_max_symbols]
+        notes.append(
+            f"模型榜单快路径(独立同池): {len(symbols_for_model)} "
+            f"(raw={before_candidate}, st_removed={st_removed})"
+        )
     elif preselect_cached_symbols is not None:
         symbols_for_model = sorted(set(str(s).zfill(6) for s in preselect_cached_symbols if str(s).strip()))
         notes.append(f"模型榜单快路径(预选缓存): {len(symbols_for_model)}")
@@ -1317,6 +1347,7 @@ def compute_market(params: dict) -> dict:
     t_start = time.time()
     pause_signals = False
     model_top_only = bool(params.get("model_top_only", False))
+    model_independent = bool(params.get("model_independent", False))
 
     def _finalize_timings() -> None:
         stats["time_total_ms"] = round((time.time() - t_start) * 1000, 2)
@@ -1525,6 +1556,9 @@ def compute_market(params: dict) -> dict:
         fast_preselect_symbols = None
         if is_watchlist:
             fast_preselect_symbols = None
+        elif model_independent:
+            fast_preselect_symbols = None
+            notes.append("模型独立: 跳过共享预选快路径。")
         elif model_candidate_mode in ("rule_shared", "shared", "rule"):
             if preselect_cached_symbols:
                 fast_preselect_symbols = preselect_cached_symbols
@@ -1553,6 +1587,7 @@ def compute_market(params: dict) -> dict:
                 news_cfg=news_cfg,
                 sector_cfg=sector_cfg,
                 is_watchlist=is_watchlist,
+                model_independent=model_independent,
                 preselect_cached_symbols=fast_preselect_symbols,
                 factors_rule=None,
             )
@@ -1786,6 +1821,34 @@ def compute_market(params: dict) -> dict:
             if is_watchlist:
                 symbols_for_model = sorted(rule_syms)
                 notes.append(f"模型榜单候选(自选): {len(symbols_for_model)}")
+            elif model_independent:
+                symbols_for_model = _list_manual_hist_symbols(manual_hist_dir)
+                before_candidate = len(symbols_for_model)
+                market_scope = params.get("market_scope", ["sh", "sz"])
+                symbols_for_model = filter_symbols_by_market(symbols_for_model, market_scope)
+                symbols_for_model = filter_symbols_by_board(
+                    symbols_for_model,
+                    exclude_star=bool(params.get("exclude_star", False)),
+                    exclude_chi_next=bool(params.get("exclude_chi_next", False)),
+                    mainboard_only=bool(params.get("mainboard_only", False)),
+                )
+                st_removed = 0
+                if bool(universe_cfg.get("exclude_st", True)):
+                    name_map = _load_universe_name_map(universe_file)
+                    filtered = []
+                    for s in symbols_for_model:
+                        nm = str(name_map.get(str(s).zfill(6), "") or "")
+                        if re.search(r"ST|\*ST|退", nm):
+                            st_removed += 1
+                            continue
+                        filtered.append(s)
+                    symbols_for_model = filtered
+                if model_candidate_max_symbols > 0:
+                    symbols_for_model = symbols_for_model[:model_candidate_max_symbols]
+                notes.append(
+                    f"模型榜单候选(独立同池): {len(symbols_for_model)} "
+                    f"(raw={before_candidate}, st_removed={st_removed})"
+                )
             elif model_candidate_mode in ("rule_shared", "shared", "rule"):
                 symbols_for_model = sorted(rule_syms)
                 notes.append(f"模型榜单候选(规则同池): {len(symbols_for_model)}")
