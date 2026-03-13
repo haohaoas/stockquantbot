@@ -81,6 +81,7 @@
             <h2>规则列表</h2>
             <span class="meta">{{ rows.length }} 条</span>
             <span class="meta" v-if="perfLabel">{{ perfLabel }}</span>
+            <span class="meta" v-if="loading">更新中...</span>
           </div>
           <div class="table-wrap" @contextmenu.prevent>
             <table>
@@ -133,7 +134,7 @@
                 </tr>
               </tbody>
             </table>
-            <div v-if="loading" class="overlay">加载中...</div>
+            <div v-if="loading && rows.length === 0" class="overlay">加载中...</div>
             <div v-if="!loading && rows.length === 0" class="overlay empty">暂无结果</div>
           </div>
         </div>
@@ -376,6 +377,7 @@ const rows = ref([])
 const modelTop = ref([])
 const notes = ref([])
 const stats = ref({})
+const modelNotes = ref([])
 const loading = ref(false)
 const modelLoading = ref(false)
 const mode = ref('all')
@@ -467,9 +469,9 @@ const perfLabel = computed(() => {
 
 const modelWarmupPending = computed(() => {
   if (modelLoading.value || modelTop.value.length > 0) return false
-  return (notes.value || []).some((note) => {
+  return (modelNotes.value || []).some((note) => {
     const text = String(note || '')
-    return text.includes('模型榜单首次生成中') || text.includes('后台刷新中') || text.includes('后台刷新已触发')
+    return text.includes('模型榜单首次生成中') || text.includes('后台刷新中') || text.includes('后台刷新已触发') || text.includes('后台调度刷新中') || text.includes('等待后台调度刷新')
   })
 })
 
@@ -731,21 +733,18 @@ async function refreshNow() {
 
   const applyMarketPayload = (data) => {
     rows.value = data.rows || []
-    modelTop.value = data.model_top || []
     notes.value = data.notes || []
     stats.value = data.stats || {}
     marketOpen.value = data.market_open
     serverTime.value = data.server_time || ''
-    scheduleModelWarmupRetry(data)
   }
 
-  const fetchMarketPayload = async (signal, modelIndependentFlag) => {
-    const url = apiUrl('/api/market')
+  const fetchMarketPayload = async (signal) => {
+    const url = apiUrl('/api/market-rows')
     url.searchParams.set('mode', mode.value)
     url.searchParams.set('provider', provider.value)
     syncSelectedModelKey()
     if (modelKey.value) url.searchParams.set('model', modelKey.value)
-    url.searchParams.set('model_independent', String(modelIndependentFlag))
     if (modelSector.value) url.searchParams.set('model_sector', modelSector.value)
     url.searchParams.set('top_n', String(topN.value))
     url.searchParams.set('only_buy', String(onlyBuy.value))
@@ -755,46 +754,18 @@ async function refreshNow() {
     return await res.json()
   }
   try {
-    const data = await fetchMarketPayload(controller.signal, modelIndependent.value)
+    const data = await fetchMarketPayload(controller.signal)
     if (requestSeq !== refreshRequestSeq) return
     applyMarketPayload(data)
+    if (viewPage.value === 'market') {
+      refreshModelTop()
+    }
   } catch (e) {
     if (requestSeq !== refreshRequestSeq) return
     const msg = (e && e.message) ? String(e.message) : 'request failed'
-    const shouldFallback =
-      modelIndependent.value && (
-        (e && e.name === 'AbortError' && timedOut) ||
-        msg.includes('HTTP 504')
-      )
-    if (shouldFallback) {
-      const retryController = new AbortController()
-      const retryTimeout = setTimeout(() => {
-        retryController.abort()
-      }, 50000)
-      try {
-        const data = await fetchMarketPayload(retryController.signal, false)
-        if (requestSeq !== refreshRequestSeq) return
-        modelIndependent.value = false
-        applyMarketPayload(data)
-        const fallbackNotes = Array.isArray(notes.value) ? notes.value.slice() : []
-        fallbackNotes.unshift('模型独立超时，已自动回退到非独立模式')
-        notes.value = fallbackNotes
-        return
-      } catch (retryErr) {
-        if (requestSeq !== refreshRequestSeq) return
-        const retryMsg = (retryErr && retryErr.message) ? retryErr.message : 'fallback failed'
-        notes.value = [`请求失败: ${retryMsg}`]
-        return
-      } finally {
-        clearTimeout(retryTimeout)
-      }
-    }
     if (e && e.name === 'AbortError') {
       if (timedOut) {
-        const hint = modelIndependent.value
-          ? '请求超时：全量模型候选过重，建议关闭“模型独立”或缩小板块范围'
-          : '请求超时，请稍后重试'
-        notes.value = [hint]
+        notes.value = ['规则列表请求超时，请稍后重试']
       }
       return
     }
@@ -830,8 +801,7 @@ async function refreshModelTop() {
 
   const applyModelPayload = (data) => {
     modelTop.value = data.model_top || []
-    notes.value = data.notes || []
-    stats.value = data.stats || {}
+    modelNotes.value = data.notes || []
     marketOpen.value = data.market_open
     serverTime.value = data.server_time || ''
     scheduleModelWarmupRetry(data)
@@ -904,7 +874,7 @@ function shouldRetryModelWarmup(data) {
   const hintNotes = Array.isArray(data?.notes) ? data.notes : []
   return hintNotes.some((note) => {
     const text = String(note || '')
-    return text.includes('模型榜单首次生成中') || text.includes('后台刷新中') || text.includes('后台刷新已触发')
+    return text.includes('模型榜单首次生成中') || text.includes('后台刷新中') || text.includes('后台刷新已触发') || text.includes('后台调度刷新中') || text.includes('等待后台调度刷新')
   })
 }
 

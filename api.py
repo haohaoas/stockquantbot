@@ -448,6 +448,12 @@ def _enrich_runtime_payload(
     return out
 
 
+def _market_rows_only_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    out = dict(payload or {})
+    out.pop("model_top", None)
+    return out
+
+
 def _refresh_model_top_quotes(
     payload: dict[str, Any],
     *,
@@ -1009,6 +1015,84 @@ def get_market(
         model_sector=model_sector,
     )
     _set_market_cache(cache_key, payload)
+    return _enrich_runtime_payload(payload, market_open=market_open, now_cn=now_cn)
+
+
+@app.get("/api/market-rows")
+def get_market_rows(
+    mode: str = Query("all", pattern="^(all|watchlist)$"),
+    top_n: int | None = Query(None),
+    only_buy: bool = Query(False),
+    intraday: bool = Query(False),
+    model: str | None = Query(None),
+    provider: str | None = Query(None, pattern="^(auto|biying|tencent|sina|netease)?$"),
+    model_sector: str | None = Query(None),
+) -> dict:
+    _apply_external_cache_bust_if_needed()
+    _start_snapshot_scheduler()
+    params, cfg, cache_key, cache_ttl = _prepare_snapshot_context(
+        kind="market",
+        mode=mode,
+        top_n=top_n,
+        only_buy=only_buy,
+        intraday=intraday,
+        model=model,
+        provider=provider,
+        model_independent=False,
+        model_sector=model_sector,
+    )
+    now_cn, market_open = _resolve_runtime_context(cfg)
+    cached = _get_market_cache(cache_key, cache_ttl)
+    if cached is not None:
+        payload = _market_rows_only_payload(cached)
+        return _enrich_runtime_payload(payload, market_open=market_open, now_cn=now_cn, extra_note=f"缓存命中({cache_ttl}s)")
+
+    entry = _get_market_cache_entry(cache_key)
+    if entry is not None and entry.get("data"):
+        note = "展示缓存快照，后台调度刷新中" if _snapshot_refresh_running(cache_key) else "展示缓存快照，等待后台调度刷新"
+        payload = _market_rows_only_payload(entry["data"])
+        return _enrich_runtime_payload(payload, market_open=market_open, now_cn=now_cn, extra_note=note)
+
+    fallback = _find_market_fallback_entry(
+        cfg=cfg,
+        mode=mode,
+        top_n=top_n,
+        only_buy=only_buy,
+        intraday=intraday,
+        model=model,
+        provider=provider,
+        model_independent=False,
+        model_sector=model_sector,
+    )
+    if fallback is not None:
+        _maybe_schedule_background_refresh(
+            kind="market",
+            mode=mode,
+            top_n=top_n,
+            only_buy=only_buy,
+            intraday=intraday,
+            model=model,
+            provider=provider,
+            model_independent=False,
+            model_sector=model_sector,
+            force=True,
+            defer_sec=0.25,
+        )
+        payload = _market_rows_only_payload(fallback[0])
+        return _enrich_runtime_payload(payload, market_open=market_open, now_cn=now_cn)
+
+    payload, _, _, _, _ = _compute_market_snapshot(
+        mode=mode,
+        top_n=top_n,
+        only_buy=only_buy,
+        intraday=intraday,
+        model=model,
+        provider=provider,
+        model_independent=False,
+        model_sector=model_sector,
+    )
+    _set_market_cache(cache_key, payload)
+    payload = _market_rows_only_payload(payload)
     return _enrich_runtime_payload(payload, market_open=market_open, now_cn=now_cn)
 
 
