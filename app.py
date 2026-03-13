@@ -7,6 +7,7 @@ import json
 import re
 import socket
 import time
+import traceback
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -2026,6 +2027,9 @@ def compute_market(params: dict) -> dict:
                     notes.append(f"模型强信号追加: {len(extra)} 条 (阈值>={model_ref_show_min:.2f})")
     except Exception as e:
         notes.append(f"因子/评分失败: {e}")
+        tb_lines = [line.strip() for line in traceback.format_exc(limit=8).splitlines() if line.strip()]
+        if tb_lines:
+            notes.append("异常定位: " + " | ".join(tb_lines[-4:]))
         _finalize_timings()
         return {"df": pd.DataFrame(), "notes": notes, "stats": stats, "model_top": model_top}
 
