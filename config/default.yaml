@@ -184,7 +184,7 @@ decision:
     enabled: true
     close_min: 4.0
     close_max: 40.0
-    pct_min: 0.5
+    pct_min: -2.0
     pct_max: 6.0
     upper_wick_gt_body: false
     require_shrink_up: false
