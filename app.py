@@ -1331,7 +1331,8 @@ def _is_market_open_cn(now: dt.datetime) -> bool:
     if now.weekday() >= 5:
         return False
     t = now.hour * 60 + now.minute
-    return (570 <= t <= 690) or (780 <= t <= 900)
+    # Include opening call auction (09:15-09:30) so auto refresh starts before continuous trading.
+    return (555 <= t <= 690) or (780 <= t <= 900)
 
 
 def _is_trading_day_cn(date: dt.date, calendar_dates: set[str] | None) -> bool:
