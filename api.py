@@ -573,6 +573,41 @@ def _compute_model_top_snapshot(
     return payload, cfg, params, cache_key, cache_ttl
 
 
+def _clone_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    out = dict(payload or {})
+    out["rows"] = [dict(x) for x in (payload.get("rows") or [])] if isinstance(payload, dict) else []
+    out["model_top"] = [dict(x) for x in (payload.get("model_top") or [])] if isinstance(payload, dict) else []
+    out["notes"] = list(payload.get("notes") or []) if isinstance(payload, dict) else []
+    out["stats"] = dict(payload.get("stats") or {}) if isinstance(payload, dict) and isinstance(payload.get("stats"), dict) else {}
+    return out
+
+
+def _filter_buy_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for row in rows or []:
+        try:
+            if str(row.get("action", "") or "").upper() == "BUY":
+                out.append(dict(row))
+        except Exception:
+            continue
+    return out
+
+
+def _prepare_market_fallback_payload(
+    payload: dict[str, Any],
+    *,
+    only_buy: bool,
+    note: str,
+) -> dict[str, Any]:
+    out = _clone_payload(payload)
+    if only_buy:
+        out["rows"] = _filter_buy_rows(out.get("rows") or [])
+    notes = list(out.get("notes") or [])
+    notes.append(note)
+    out["notes"] = notes
+    return out
+
+
 def _prepare_snapshot_context(
     *,
     kind: str,
@@ -678,6 +713,103 @@ def _scheduled_model_keys(cfg: dict) -> list[str | None]:
     return keys
 
 
+def _scheduled_market_specs(cfg: dict, provider: str) -> list[dict[str, Any]]:
+    specs: list[dict[str, Any]] = []
+    for mode in ("all", "watchlist"):
+        for model_key in _scheduled_model_keys(cfg):
+            specs.append(
+                {
+                    "mode": mode,
+                    "top_n": None,
+                    "only_buy": False,
+                    "intraday": False,
+                    "model": model_key,
+                    "provider": provider,
+                    "model_independent": False,
+                    "model_sector": None,
+                }
+            )
+    return specs
+
+
+def _find_market_fallback_entry(
+    *,
+    cfg: dict,
+    mode: str,
+    top_n: int | None,
+    only_buy: bool,
+    intraday: bool,
+    model: str | None,
+    provider: str | None,
+    model_independent: bool,
+    model_sector: str | None,
+) -> tuple[dict[str, Any], str] | None:
+    default_provider = _default_provider(cfg)
+    candidates: list[tuple[dict[str, Any], str]] = []
+    if only_buy:
+        candidates.append(
+            (
+                {
+                    "mode": mode,
+                    "top_n": top_n,
+                    "only_buy": False,
+                    "intraday": intraday,
+                    "model": model,
+                    "provider": provider,
+                    "model_independent": model_independent,
+                    "model_sector": model_sector,
+                },
+                "只看 BUY 快照预热中，先展示基础快照筛选结果",
+            )
+        )
+    provider_norm = str(provider or "").strip().lower()
+    if default_provider and provider_norm and provider_norm != default_provider:
+        candidates.append(
+            (
+                {
+                    "mode": mode,
+                    "top_n": top_n,
+                    "only_buy": only_buy,
+                    "intraday": intraday,
+                    "model": model,
+                    "provider": default_provider,
+                    "model_independent": model_independent,
+                    "model_sector": model_sector,
+                },
+                f"行情源 {provider_norm} 快照预热中，先展示 {default_provider} 快照",
+            )
+        )
+        if only_buy:
+            candidates.append(
+                (
+                    {
+                        "mode": mode,
+                        "top_n": top_n,
+                        "only_buy": False,
+                        "intraday": intraday,
+                        "model": model,
+                        "provider": default_provider,
+                        "model_independent": model_independent,
+                        "model_sector": model_sector,
+                    },
+                    f"行情源 {provider_norm} 和只看 BUY 快照预热中，先展示 {default_provider} 基础快照筛选结果",
+                )
+            )
+
+    seen_keys: set[str] = set()
+    for kwargs, note in candidates:
+        _, _, candidate_key, _ = _prepare_snapshot_context(kind="market", **kwargs)
+        if candidate_key in seen_keys:
+            continue
+        seen_keys.add(candidate_key)
+        entry = _get_market_cache_entry(candidate_key)
+        if entry is None or not entry.get("data"):
+            continue
+        payload = _prepare_market_fallback_payload(entry["data"], only_buy=only_buy, note=note)
+        return payload, note
+    return None
+
+
 def _maybe_schedule_background_refresh(
     *,
     kind: str,
@@ -735,9 +867,7 @@ def _snapshot_scheduler_loop() -> None:
             cfg = app_module.load_config("config/default.yaml")
             provider = _default_provider(cfg)
             market_sec, model_sec, model_independent_sec = _resolve_refresh_intervals(cfg)
-            specs = [
-                ("market", {"mode": "all", "top_n": None, "only_buy": False, "intraday": False, "model": None, "provider": provider, "model_independent": False, "model_sector": None}, market_sec),
-            ]
+            specs = [("market", kwargs, market_sec) for kwargs in _scheduled_market_specs(cfg, provider)]
             for model_key in _scheduled_model_keys(cfg):
                 specs.append(
                     ("model_top", {"mode": "all", "top_n": None, "only_buy": False, "intraday": False, "model": model_key, "provider": provider, "model_independent": False, "model_sector": None}, model_sec)
@@ -748,8 +878,6 @@ def _snapshot_scheduler_loop() -> None:
             now_cn, market_open = _resolve_runtime_context(cfg)
             today = str(app_module.resolve_trade_date(""))
             for kind, kwargs, interval_sec in specs:
-                if kind == "market" and not market_open:
-                    continue
                 _, _, cache_key, _ = _prepare_snapshot_context(kind=kind, **kwargs)
                 entry = _get_market_cache_entry(cache_key)
                 if entry is None:
@@ -759,6 +887,8 @@ def _snapshot_scheduler_loop() -> None:
                 payload = entry.get("data") or {}
                 trade_date = str(payload.get("trade_date", "") or "")
                 due = age >= max(30, int(interval_sec))
+                if kind == "market" and not market_open:
+                    due = trade_date != today
                 if kind == "model_top" and trade_date != today:
                     due = True
                 if due:
@@ -843,6 +973,33 @@ def get_market(
         note = "展示缓存快照，后台刷新中" if _snapshot_refresh_running(cache_key) else "展示缓存快照，后台刷新已触发"
         payload = _refresh_model_top_quotes(entry["data"], params=params)
         return _enrich_runtime_payload(payload, market_open=market_open, now_cn=now_cn, extra_note=note)
+
+    fallback = _find_market_fallback_entry(
+        cfg=cfg,
+        mode=mode,
+        top_n=top_n,
+        only_buy=only_buy,
+        intraday=intraday,
+        model=model,
+        provider=provider,
+        model_independent=model_independent,
+        model_sector=model_sector,
+    )
+    if fallback is not None:
+        _maybe_schedule_background_refresh(
+            kind="market",
+            mode=mode,
+            top_n=top_n,
+            only_buy=only_buy,
+            intraday=intraday,
+            model=model,
+            provider=provider,
+            model_independent=model_independent,
+            model_sector=model_sector,
+            force=True,
+        )
+        payload = _refresh_model_top_quotes(fallback[0], params=params)
+        return _enrich_runtime_payload(payload, market_open=market_open, now_cn=now_cn)
 
     payload, _, _, _, _ = _compute_market_snapshot(
         mode=mode,
