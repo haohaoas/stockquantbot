@@ -1956,7 +1956,13 @@ def compute_market(params: dict) -> dict:
                     notes.append("板块映射: 未命中")
                 if hot_set and "sector" in factors_for_rule.columns:
                     factors_for_rule["hot_sector"] = factors_for_rule["sector"].apply(lambda x: 1 if _is_hot_sector(x, hot_set) else 0)
-            ranked_full = score_and_rank(factors_for_rule, weights, top_n=preselect_n, sector_cfg=sector_cfg)
+            ranked_full = score_and_rank(
+                factors_for_rule,
+                weights,
+                top_n=preselect_n,
+                sector_cfg=sector_cfg,
+                decision_cfg=decision_cfg,
+            )
             ranked_full = apply_short_term_decision(ranked_full, decision_cfg)
             intraday_cfg = decision_cfg.get("intraday_v2") or {}
             if isinstance(intraday_cfg, dict) and intraday_cfg.get("enabled"):

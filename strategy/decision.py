@@ -67,6 +67,8 @@ def apply_short_term_decision(df: pd.DataFrame, decision_cfg: dict) -> pd.DataFr
     pullback_min_pct = float(cfg.get("pullback_min_pct", -2.0))
     pullback_require_macd = bool(cfg.get("pullback_require_macd", False))
     pullback_override_ratio = float(cfg.get("pullback_override_ratio", 1.5))
+    rebound_min_score = float(cfg.get("rebound_min_score", max(min_score * 0.6, 12.0)))
+    enable_rebound = bool(cfg.get("enable_rebound", True))
     post_filter_rsi_min = float(cfg.get("post_filter_rsi_min", 0.0))
     post_filter_rsi_max = float(cfg.get("post_filter_rsi_max", 100.0))
     post_filter_macd_positive = bool(cfg.get("post_filter_macd_positive", False))
@@ -136,6 +138,10 @@ def apply_short_term_decision(df: pd.DataFrame, decision_cfg: dict) -> pd.DataFr
         weibi = float(pd.to_numeric(r.get("weibi", float("nan")), errors="coerce"))
         days_since_hhv = float(r.get("days_since_hhv", float("nan")))
         sector_boost = float(r.get("sector_boost", 0.0))
+        path_breakout_strength = float(r.get("path_breakout_strength", 0.0) or 0.0)
+        path_pullback_strength = float(r.get("path_pullback_strength", 0.0) or 0.0)
+        path_rebound_strength = float(r.get("path_rebound_strength", 0.0) or 0.0)
+        best_path = str(r.get("best_path", "") or "").strip().lower()
         pullback_vol_ok = False
 
         cond_score_breakout = score >= breakout_min_score
@@ -266,45 +272,58 @@ def apply_short_term_decision(df: pd.DataFrame, decision_cfg: dict) -> pd.DataFr
             if pullback and pullback_require_macd:
                 pullback = (macd_hist == macd_hist) and macd_hist > 0
 
-        main_ok = enable_breakout and cond_score_breakout and cond_breakout and cond_vol and cond_trend and cond_risk and cond_daily_gate
-        if main_ok and pullback:
-            # Strength comparison to decide path
-            base_strength = max(breakout_threshold, 0.02)
-            breakout_norm = min(1.0, max(0.0, breakout_strength / base_strength))
-            vol_base = max(breakout_min_volume_multiple, 1.2)
-            vol_norm = min(1.0, max(0.0, vol_ratio / vol_base))
-            main_strength = breakout_norm * vol_norm
+        breakout_ok = (
+            enable_breakout
+            and cond_score_breakout
+            and cond_breakout
+            and cond_vol
+            and cond_trend
+            and cond_risk
+            and cond_daily_gate
+            and path_breakout_strength > 0
+        )
+        pullback = pullback and path_pullback_strength > 0
+        rebound = (
+            enable_rebound
+            and score >= rebound_min_score
+            and cond_risk
+            and path_rebound_strength > 0
+        )
 
-            depth_norm = 0.0
-            if dist == dist and max_dist_pct > 0:
-                depth_norm = max(0.0, min(1.0, 1.0 - dist / max_dist_pct))
-            support_strength = 0.5
-            if ma20_slope == ma20_slope:
-                support_strength = max(0.2, min(1.0, 0.5 + 10.0 * ma20_slope))
-            pullback_strength = depth_norm * support_strength
+        path_candidates: list[tuple[str, float]] = []
+        if breakout_ok:
+            path_candidates.append(("breakout", path_breakout_strength))
+        if pullback:
+            path_candidates.append(("pullback", path_pullback_strength))
+        if rebound:
+            # Rebound path is intentionally allowed to be looser than breakout daily-gate.
+            path_candidates.append(("rebound", path_rebound_strength))
 
-            if pullback_strength > main_strength * pullback_override_ratio:
-                action = "BUY"
-                signal_path = "pullback"
-            else:
-                action = "BUY"
-                signal_path = "main"
-        elif main_ok:
+        if path_candidates:
+            preferred_path, preferred_strength = max(path_candidates, key=lambda x: x[1])
+            if best_path in {p for p, _ in path_candidates}:
+                best_strength = {
+                    "breakout": path_breakout_strength,
+                    "pullback": path_pullback_strength,
+                    "rebound": path_rebound_strength,
+                }.get(best_path, 0.0)
+                if best_strength >= preferred_strength / max(pullback_override_ratio, 1.0):
+                    preferred_path = best_path
             action = "BUY"
-            signal_path = "main"
-        elif pullback:
-            action = "BUY"
-            signal_path = "pullback"
+            signal_path = preferred_path
         elif near_breakout and trend >= 0.4:
             action = "WATCH"
             signal_path = "watch"
+        elif path_rebound_strength > 0 and score >= rebound_min_score * 0.8:
+            action = "WATCH"
+            signal_path = "rebound_watch"
 
         weibi_hint = ""
         if weibi_enabled and (weibi == weibi):
-            key_signal = signal_path in ("main", "pullback")
+            key_signal = signal_path in ("breakout", "pullback", "rebound")
             if (not weibi_key_signal_only) or key_signal:
                 # BREAKOUT路径：委比负只降仓，不放弃信号。
-                if action == "BUY" and signal_path == "main":
+                if action == "BUY" and signal_path == "breakout":
                     if weibi <= weibi_neg_max:
                         position_scale *= weibi_breakout_neg_reduce_scale
                         weibi_hint = "突破委比为负，建议降仓参与"
@@ -319,6 +338,9 @@ def apply_short_term_decision(df: pd.DataFrame, decision_cfg: dict) -> pd.DataFr
                     elif weibi <= weibi_neg_max:
                         position_scale *= weibi_pullback_neg_reduce_scale
                         weibi_hint = "回踩委比偏弱，建议轻仓试错"
+                if action == "BUY" and signal_path == "rebound" and weibi <= weibi_neg_max:
+                    position_scale *= weibi_pullback_neg_reduce_scale
+                    weibi_hint = "超跌反弹承接偏弱，建议轻仓"
 
         # Entry/stop/target
         entry = last_close if last_close > 0 else float("nan")
@@ -348,6 +370,15 @@ def apply_short_term_decision(df: pd.DataFrame, decision_cfg: dict) -> pd.DataFr
                     reason_parts.append("风险可控")
                 if cond_score_breakout:
                     reason_parts.append("评分达标")
+            elif signal_path == "rebound":
+                reason_parts.append("超跌反弹")
+                if rsi_val == rsi_val and rsi_val <= 30:
+                    reason_parts.append("RSI超卖")
+                if pct_chg >= 0:
+                    reason_parts.append("止跌转强")
+                if cond_risk:
+                    reason_parts.append("风险可控")
+                reason_parts.append("评分达标")
             else:
                 if cond_breakout:
                     reason_parts.append("突破新高")
@@ -364,9 +395,12 @@ def apply_short_term_decision(df: pd.DataFrame, decision_cfg: dict) -> pd.DataFr
             if sector_boost > 0:
                 reason_parts.append("板块共振")
         elif action == "WATCH":
-            reason_parts.append("接近新高")
-            if trend >= 0.4:
-                reason_parts.append("趋势尚可")
+            if signal_path == "rebound_watch":
+                reason_parts.append("超跌修复观察")
+            else:
+                reason_parts.append("接近新高")
+                if trend >= 0.4:
+                    reason_parts.append("趋势尚可")
             if sector_boost > 0:
                 reason_parts.append("板块共振")
         else:

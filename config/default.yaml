@@ -100,6 +100,12 @@ score_weights:
   rsi: 5
   macd: 5
   risk_penalty_max: 20
+  path_blend: 0.65
+  path_weights:
+    breakout: 0.45
+    pullback: 0.35
+    rebound: 0.20
+    momentum: 0.0
   factor_weights:
     price_accel_5: 0.2
     price_accel_10: 0.2
@@ -124,6 +130,7 @@ decision:
   mode: short_term
   min_score: 20.0
   enable_breakout: true
+  enable_rebound: true
   breakout_min_score: 20.0
   require_breakout: true
   require_vol_ok: false
@@ -163,9 +170,27 @@ decision:
   pullback_min_pct: -4.0
   pullback_require_macd: false
   pullback_override_ratio: 1.5
+  rebound_min_score: 12.0
   post_filter_rsi_min: 25
   post_filter_rsi_max: 85
   post_filter_macd_positive: false
+  signal_paths:
+    breakout:
+      enabled: true
+      vol_threshold: 1.2
+      min_pct: 1.0
+    pullback:
+      enabled: true
+      max_ma20_dist: 0.05
+      shrink_threshold: 0.8
+      lower_wick_ratio_min: 0.3
+      min_days_since_high: 3
+    rebound:
+      enabled: true
+      bias_threshold: -0.08
+      vol_ratio_5_max: 1.2
+      rsi_max: 30.0
+      lower_wick_ratio_min: 0.35
   weibi_enabled: true
   weibi_key_signal_only: true
   weibi_pos_min: 5.0
