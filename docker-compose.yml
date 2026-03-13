@@ -1,6 +1,7 @@
 services:
   app:
     image: stockquantbot:latest
+    pull_policy: never
     build:
       context: .
       dockerfile: Dockerfile
