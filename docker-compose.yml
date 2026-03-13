@@ -5,8 +5,26 @@ services:
       dockerfile: Dockerfile
     container_name: stockquantbot_app
     restart: unless-stopped
+    command: ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+    environment:
+      SQB_ENABLE_SNAPSHOT_SCHEDULER: "0"
     ports:
       - "127.0.0.1:8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config
+      - ./models:/app/models
+      - ./cache:/app/cache
+      - ./output:/app/output
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: stockquantbot_scheduler
+    restart: unless-stopped
+    command: ["python", "snapshot_worker.py"]
+    environment:
+      SQB_ENABLE_SNAPSHOT_SCHEDULER: "1"
     volumes:
       - ./data:/app/data
       - ./config:/app/config

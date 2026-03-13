@@ -56,6 +56,11 @@ _CACHE_BUST_STATE: dict[str, int] = {"mtime_ns": 0}
 _SNAPSHOT_CACHE_DIR = Path("./cache/api_snapshots")
 
 
+def _snapshot_scheduler_enabled() -> bool:
+    raw = str(os.getenv("SQB_ENABLE_SNAPSHOT_SCHEDULER", "1") or "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
 def _market_cache_key(
     mode: str,
     top_n: int | None,
@@ -914,6 +919,8 @@ def _snapshot_scheduler_loop() -> None:
 
 
 def _start_snapshot_scheduler() -> None:
+    if not _snapshot_scheduler_enabled():
+        return
     global _SNAPSHOT_SCHEDULER_STARTED
     with _SNAPSHOT_SCHEDULER_LOCK:
         if _SNAPSHOT_SCHEDULER_STARTED:
