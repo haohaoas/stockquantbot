@@ -829,26 +829,18 @@ async function refreshModelTop() {
   } catch (e) {
     if (requestSeq !== modelRequestSeq) return
     const msg = (e && e.message) ? String(e.message) : 'request failed'
-    const shouldFallback =
+    const independentPending =
       modelIndependent.value && (
         (e && e.name === 'AbortError' && timedOut) ||
         msg.includes('HTTP 504')
       )
-    if (shouldFallback) {
-      const retryController = new AbortController()
-      const retryTimeout = setTimeout(() => {
-        retryController.abort()
-      }, 50000)
-      try {
-        const data = await fetchModelPayload(retryController.signal, false)
-        if (requestSeq !== modelRequestSeq) return
-        modelIndependent.value = false
-        applyModelPayload(data)
-        return
-      } finally {
-        clearTimeout(retryTimeout)
-      }
+    if (independentPending) {
+      modelTop.value = []
+      modelNotes.value = ['独立候选生成中，后台继续计算，页面会自动重试']
+      scheduleModelWarmupRetry({ model_top: [], notes: modelNotes.value })
+      return
     }
+    modelNotes.value = [`模型榜单请求失败: ${msg}`]
   } finally {
     clearTimeout(timeoutId)
     if (modelAbortController === controller) {
@@ -874,7 +866,7 @@ function shouldRetryModelWarmup(data) {
   const hintNotes = Array.isArray(data?.notes) ? data.notes : []
   return hintNotes.some((note) => {
     const text = String(note || '')
-    return text.includes('模型榜单首次生成中') || text.includes('后台刷新中') || text.includes('后台刷新已触发') || text.includes('后台调度刷新中') || text.includes('等待后台调度刷新')
+    return text.includes('模型榜单首次生成中') || text.includes('后台刷新中') || text.includes('后台刷新已触发') || text.includes('后台调度刷新中') || text.includes('等待后台调度刷新') || text.includes('独立候选生成中')
   })
 }
 

@@ -1138,41 +1138,6 @@ def get_model_top(
         payload = _refresh_model_top_quotes(entry["data"], params=params)
         return _enrich_runtime_payload(payload, market_open=market_open, now_cn=now_cn, extra_note=note)
 
-    if model_independent:
-        _, _, shared_cache_key, _ = _prepare_snapshot_context(
-            kind="model_top",
-            mode=mode,
-            top_n=top_n,
-            only_buy=False,
-            intraday=intraday,
-            model=model,
-            provider=provider,
-            model_independent=False,
-            model_sector=model_sector,
-        )
-        shared_entry = _get_market_cache_entry(shared_cache_key)
-        if shared_entry is not None and shared_entry.get("data"):
-            _maybe_schedule_background_refresh(
-                kind="model_top",
-                mode=mode,
-                top_n=top_n,
-                only_buy=False,
-                intraday=intraday,
-                model=model,
-                provider=provider,
-                model_independent=True,
-                model_sector=model_sector,
-                force=True,
-                defer_sec=0.25,
-            )
-            payload = _refresh_model_top_quotes(shared_entry["data"], params=params)
-            return _enrich_runtime_payload(
-                payload,
-                market_open=market_open,
-                now_cn=now_cn,
-                extra_note="独立候选预热中，先展示共享候选快照",
-            )
-
     if mode == "watchlist" or not model_independent:
         payload, _, _, _, _ = _compute_model_top_snapshot(
             mode=mode,
