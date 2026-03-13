@@ -53,6 +53,7 @@ _REVIEW_JOURNAL_PATH = Path("./data/review_journal.json")
 _REVIEW_MONITOR_CFG_PATH = Path("./data/review_monitor_config.json")
 _CACHE_BUST_SIGNAL_PATH = Path("./cache/data_refresh_signal.json")
 _CACHE_BUST_STATE: dict[str, int] = {"mtime_ns": 0}
+_SNAPSHOT_CACHE_DIR = Path("./cache/api_snapshots")
 
 
 def _market_cache_key(
@@ -89,24 +90,61 @@ def _get_market_cache(key: str, ttl_sec: int) -> dict[str, Any] | None:
     now = time.time()
     with _MARKET_CACHE_LOCK:
         entry = _MARKET_CACHE.get(key)
-        if not entry:
-            return None
-        if now - float(entry.get("ts", 0)) > ttl_sec:
-            return None
-        return entry.get("data")
+        if entry and now - float(entry.get("ts", 0)) <= ttl_sec:
+            return entry.get("data")
+
+    disk_entry = _get_market_disk_cache_entry(key)
+    if not disk_entry:
+        return None
+    if now - float(disk_entry.get("ts", 0)) > ttl_sec:
+        return None
+    return disk_entry.get("data")
 
 
 def _get_market_cache_entry(key: str) -> dict[str, Any] | None:
     with _MARKET_CACHE_LOCK:
         entry = _MARKET_CACHE.get(key)
-        if not entry:
-            return None
-        return dict(entry)
+        if entry:
+            return dict(entry)
+    return _get_market_disk_cache_entry(key)
 
 
 def _set_market_cache(key: str, data: dict[str, Any]) -> None:
     with _MARKET_CACHE_LOCK:
         _MARKET_CACHE[key] = {"ts": time.time(), "data": data}
+    _set_market_disk_cache(key, data)
+
+
+def _market_disk_cache_path(key: str) -> Path:
+    digest = hashlib.md5(key.encode("utf-8"), usedforsecurity=False).hexdigest()
+    return _SNAPSHOT_CACHE_DIR / f"{digest}.json"
+
+
+def _get_market_disk_cache_entry(key: str) -> dict[str, Any] | None:
+    path = _market_disk_cache_path(key)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if str(payload.get("key", "")) != key:
+        return None
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return None
+    return {"ts": float(payload.get("ts", 0) or 0), "data": data}
+
+
+def _set_market_disk_cache(key: str, data: dict[str, Any]) -> None:
+    try:
+        _SNAPSHOT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        payload = {"key": key, "ts": time.time(), "data": data}
+        _market_disk_cache_path(key).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
 
 
 def _clear_runtime_caches() -> None:
