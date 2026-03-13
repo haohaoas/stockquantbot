@@ -751,6 +751,44 @@ def _scheduled_market_specs(cfg: dict, provider: str) -> list[dict[str, Any]]:
     return specs
 
 
+def _scheduled_model_top_specs(cfg: dict, provider: str) -> list[tuple[dict[str, Any], int]]:
+    specs: list[tuple[dict[str, Any], int]] = []
+    _, model_sec, model_independent_sec = _resolve_refresh_intervals(cfg)
+    default_top_n = _resolve_top_n(cfg, None)
+    for model_key in _scheduled_model_keys(cfg):
+        specs.append(
+            (
+                {
+                    "mode": "all",
+                    "top_n": default_top_n,
+                    "only_buy": False,
+                    "intraday": False,
+                    "model": model_key,
+                    "provider": provider,
+                    "model_independent": False,
+                    "model_sector": None,
+                },
+                model_sec,
+            )
+        )
+        specs.append(
+            (
+                {
+                    "mode": "all",
+                    "top_n": default_top_n,
+                    "only_buy": False,
+                    "intraday": False,
+                    "model": model_key,
+                    "provider": provider,
+                    "model_independent": True,
+                    "model_sector": None,
+                },
+                model_independent_sec,
+            )
+        )
+    return specs
+
+
 def _find_market_fallback_entry(
     *,
     cfg: dict,
@@ -886,15 +924,10 @@ def _snapshot_scheduler_loop() -> None:
             _apply_external_cache_bust_if_needed()
             cfg = app_module.load_config("config/default.yaml")
             provider = _default_provider(cfg)
-            market_sec, model_sec, model_independent_sec = _resolve_refresh_intervals(cfg)
+            market_sec, _, _ = _resolve_refresh_intervals(cfg)
             specs = [("market", kwargs, market_sec) for kwargs in _scheduled_market_specs(cfg, provider)]
-            for model_key in _scheduled_model_keys(cfg):
-                specs.append(
-                    ("model_top", {"mode": "all", "top_n": None, "only_buy": False, "intraday": False, "model": model_key, "provider": provider, "model_independent": False, "model_sector": None}, model_sec)
-                )
-                specs.append(
-                    ("model_top", {"mode": "all", "top_n": None, "only_buy": False, "intraday": False, "model": model_key, "provider": provider, "model_independent": True, "model_sector": None}, model_independent_sec)
-                )
+            for kwargs, interval_sec in _scheduled_model_top_specs(cfg, provider):
+                specs.append(("model_top", kwargs, interval_sec))
             now_cn, market_open = _resolve_runtime_context(cfg)
             today = str(app_module.resolve_trade_date(""))
             for kind, kwargs, interval_sec in specs:
@@ -909,8 +942,12 @@ def _snapshot_scheduler_loop() -> None:
                 due = age >= max(30, int(interval_sec))
                 if kind == "market" and not market_open:
                     due = trade_date != today
-                if kind == "model_top" and trade_date != today:
-                    due = True
+                if kind == "model_top":
+                    if bool(kwargs.get("model_independent")):
+                        # Independent candidates are day-level snapshots: recompute only for a new trade date.
+                        due = trade_date != today
+                    elif trade_date != today:
+                        due = True
                 if due:
                     _maybe_schedule_background_refresh(kind=kind, force=True, **kwargs)
         except Exception:
