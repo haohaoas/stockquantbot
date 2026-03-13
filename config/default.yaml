@@ -206,13 +206,13 @@ decision:
   market_env: auto
   market_filter_v2:
     enabled: true
-    block_on_fail: true
+    block_on_fail: false
     ma_fast: 20
     ma_slow: 60
     vol_window: 20
     vol_history: 20
     vol_ratio_max: 1.5
-    breadth_up_ratio_min: 0.40
+    breadth_up_ratio_min: 0.30
   model_conflict:
     enabled: true
     model_min: 0.85
