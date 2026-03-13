@@ -652,6 +652,7 @@ def _trigger_snapshot_refresh(
     runner,
     *,
     min_gap_sec: int = 5,
+    start_delay_sec: float = 0.0,
 ) -> bool:
     now = time.time()
     with _MARKET_CACHE_LOCK:
@@ -682,7 +683,14 @@ def _trigger_snapshot_refresh(
                 st2["last_error"] = err
                 _SNAPSHOT_REFRESH_STATE[key] = st2
 
-    threading.Thread(target=_worker, daemon=True, name=f"snapshot-refresh:{key[:32]}").start()
+    delay = max(0.0, float(start_delay_sec or 0.0))
+    if delay > 0:
+        timer = threading.Timer(delay, _worker)
+        timer.daemon = True
+        timer.name = f"snapshot-refresh-delay:{key[:24]}"
+        timer.start()
+    else:
+        threading.Thread(target=_worker, daemon=True, name=f"snapshot-refresh:{key[:32]}").start()
     return True
 
 
@@ -822,6 +830,7 @@ def _maybe_schedule_background_refresh(
     model_independent: bool,
     model_sector: str | None,
     force: bool = False,
+    defer_sec: float = 0.0,
 ) -> tuple[str, bool]:
     _, cfg, cache_key, _ = _prepare_snapshot_context(
         kind=kind,
@@ -856,7 +865,7 @@ def _maybe_schedule_background_refresh(
             model_sector=model_sector,
         )[0]
     min_gap = 0 if force else max(5, int(_resolve_cache_ttl(cfg) or 5))
-    triggered = _trigger_snapshot_refresh(cache_key, runner, min_gap_sec=min_gap)
+    triggered = _trigger_snapshot_refresh(cache_key, runner, min_gap_sec=min_gap, start_delay_sec=defer_sec)
     return cache_key, triggered
 
 
@@ -968,6 +977,7 @@ def get_market(
             model_independent=model_independent,
             model_sector=model_sector,
             force=True,
+            defer_sec=0.25,
         )
         note = "展示缓存快照，后台刷新中" if _snapshot_refresh_running(cache_key) else "展示缓存快照，后台刷新已触发"
         payload = entry["data"]
@@ -996,6 +1006,7 @@ def get_market(
             model_independent=model_independent,
             model_sector=model_sector,
             force=True,
+            defer_sec=0.25,
         )
         payload = fallback[0]
         return _enrich_runtime_payload(payload, market_open=market_open, now_cn=now_cn)
@@ -1056,6 +1067,7 @@ def get_model_top(
             model_independent=model_independent,
             model_sector=model_sector,
             force=True,
+            defer_sec=0.25,
         )
         note = "展示缓存快照，后台刷新中" if _snapshot_refresh_running(cache_key) else "展示缓存快照，后台刷新已触发"
         payload = _refresh_model_top_quotes(entry["data"], params=params)
@@ -1086,6 +1098,7 @@ def get_model_top(
                 model_independent=True,
                 model_sector=model_sector,
                 force=True,
+                defer_sec=0.25,
             )
             payload = _refresh_model_top_quotes(shared_entry["data"], params=params)
             return _enrich_runtime_payload(
@@ -1120,6 +1133,7 @@ def get_model_top(
         model_independent=model_independent,
         model_sector=model_sector,
         force=True,
+        defer_sec=0.25,
     )
     placeholder = {
         "model_top": [],
