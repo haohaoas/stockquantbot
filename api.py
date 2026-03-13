@@ -953,7 +953,6 @@ def get_market(
     now_cn, market_open = _resolve_runtime_context(cfg)
     cached = _get_market_cache(cache_key, cache_ttl)
     if cached is not None:
-        cached = _refresh_model_top_quotes(cached, params=params)
         return _enrich_runtime_payload(cached, market_open=market_open, now_cn=now_cn, extra_note=f"缓存命中({cache_ttl}s)")
 
     entry = _get_market_cache_entry(cache_key)
@@ -971,7 +970,7 @@ def get_market(
             force=True,
         )
         note = "展示缓存快照，后台刷新中" if _snapshot_refresh_running(cache_key) else "展示缓存快照，后台刷新已触发"
-        payload = _refresh_model_top_quotes(entry["data"], params=params)
+        payload = entry["data"]
         return _enrich_runtime_payload(payload, market_open=market_open, now_cn=now_cn, extra_note=note)
 
     fallback = _find_market_fallback_entry(
@@ -998,7 +997,7 @@ def get_market(
             model_sector=model_sector,
             force=True,
         )
-        payload = _refresh_model_top_quotes(fallback[0], params=params)
+        payload = fallback[0]
         return _enrich_runtime_payload(payload, market_open=market_open, now_cn=now_cn)
 
     payload, _, _, _, _ = _compute_market_snapshot(
