@@ -966,20 +966,7 @@ def get_market(
 
     entry = _get_market_cache_entry(cache_key)
     if entry is not None and entry.get("data"):
-        _maybe_schedule_background_refresh(
-            kind="market",
-            mode=mode,
-            top_n=top_n,
-            only_buy=only_buy,
-            intraday=intraday,
-            model=model,
-            provider=provider,
-            model_independent=model_independent,
-            model_sector=model_sector,
-            force=True,
-            defer_sec=0.25,
-        )
-        note = "展示缓存快照，后台刷新中" if _snapshot_refresh_running(cache_key) else "展示缓存快照，后台刷新已触发"
+        note = "展示缓存快照，后台调度刷新中" if _snapshot_refresh_running(cache_key) else "展示缓存快照，等待后台调度刷新"
         payload = entry["data"]
         return _enrich_runtime_payload(payload, market_open=market_open, now_cn=now_cn, extra_note=note)
 
@@ -1056,20 +1043,7 @@ def get_model_top(
 
     entry = _get_market_cache_entry(cache_key)
     if entry is not None and entry.get("data"):
-        _maybe_schedule_background_refresh(
-            kind="model_top",
-            mode=mode,
-            top_n=top_n,
-            only_buy=False,
-            intraday=intraday,
-            model=model,
-            provider=provider,
-            model_independent=model_independent,
-            model_sector=model_sector,
-            force=True,
-            defer_sec=0.25,
-        )
-        note = "展示缓存快照，后台刷新中" if _snapshot_refresh_running(cache_key) else "展示缓存快照，后台刷新已触发"
+        note = "展示缓存快照，后台调度刷新中" if _snapshot_refresh_running(cache_key) else "展示缓存快照，等待后台调度刷新"
         payload = _refresh_model_top_quotes(entry["data"], params=params)
         return _enrich_runtime_payload(payload, market_open=market_open, now_cn=now_cn, extra_note=note)
 
