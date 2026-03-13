@@ -918,6 +918,72 @@ def _maybe_schedule_background_refresh(
     return cache_key, triggered
 
 
+def _compute_and_store_snapshot(
+    *,
+    kind: str,
+    mode: str,
+    top_n: int | None,
+    only_buy: bool,
+    intraday: bool,
+    model: str | None,
+    provider: str | None,
+    model_independent: bool,
+    model_sector: str | None,
+) -> tuple[str, dict[str, Any]]:
+    if kind == "market":
+        payload, _, _, cache_key, _ = _compute_market_snapshot(
+            mode=mode,
+            top_n=top_n,
+            only_buy=only_buy,
+            intraday=intraday,
+            model=model,
+            provider=provider,
+            model_independent=model_independent,
+            model_sector=model_sector,
+        )
+    else:
+        payload, _, _, cache_key, _ = _compute_model_top_snapshot(
+            mode=mode,
+            top_n=top_n,
+            intraday=intraday,
+            model=model,
+            provider=provider,
+            model_independent=model_independent,
+            model_sector=model_sector,
+        )
+    _set_market_cache(cache_key, payload)
+    return cache_key, payload
+
+
+def _run_startup_snapshot_prewarm() -> dict[str, Any]:
+    cfg = app_module.load_config("config/default.yaml")
+    provider = _default_provider(cfg)
+    today = str(app_module.resolve_trade_date(""))
+    results: dict[str, Any] = {"ok": 0, "skip": 0, "fail": 0, "items": []}
+    for kwargs, _interval_sec in _scheduled_model_top_specs(cfg, provider):
+        # Real independent model-top is the slowest chain and should exist before users click.
+        if not bool(kwargs.get("model_independent")):
+            continue
+        _, _, cache_key, _ = _prepare_snapshot_context(kind="model_top", **kwargs)
+        entry = _get_market_cache_entry(cache_key)
+        payload = (entry or {}).get("data") or {}
+        trade_date = str(payload.get("trade_date", "") or "")
+        if trade_date == today and (payload.get("model_top") or []):
+            results["skip"] += 1
+            results["items"].append({"kind": "model_top", "model": kwargs.get("model"), "status": "skip"})
+            continue
+        try:
+            _compute_and_store_snapshot(kind="model_top", **kwargs)
+            results["ok"] += 1
+            results["items"].append({"kind": "model_top", "model": kwargs.get("model"), "status": "ok"})
+        except Exception as e:
+            results["fail"] += 1
+            results["items"].append(
+                {"kind": "model_top", "model": kwargs.get("model"), "status": "fail", "error": str(e)}
+            )
+    return results
+
+
 def _snapshot_scheduler_loop() -> None:
     while True:
         try:
