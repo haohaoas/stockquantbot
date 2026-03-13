@@ -1,5 +1,6 @@
 services:
   app:
+    image: stockquantbot:latest
     build:
       context: .
       dockerfile: Dockerfile
@@ -17,9 +18,7 @@ services:
       - ./cache:/app/cache
       - ./output:/app/output
   scheduler:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: stockquantbot:latest
     container_name: stockquantbot_scheduler
     restart: unless-stopped
     command: ["python", "snapshot_worker.py"]
