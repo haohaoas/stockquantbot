@@ -453,6 +453,40 @@ function apiUrl(path) {
   return new URL(apiEndpoint(path), window.location.origin)
 }
 
+function resetPageStateAndReload() {
+  for (const key of [
+    'sqb_mode',
+    'sqb_provider',
+    'sqb_model',
+    'sqb_model_independent',
+    'sqb_model_sector',
+    'sqb_view_page'
+  ]) {
+    localStorage.removeItem(key)
+  }
+  window.location.reload()
+}
+
+function isTradeDateStale(serverTimeText, tradeDateText) {
+  const server = String(serverTimeText || '').slice(0, 10)
+  const trade = String(tradeDateText || '').slice(0, 10)
+  if (!server || !trade) return false
+  if (trade >= server) return false
+  const serverDate = new Date(`${server}T00:00:00+08:00`)
+  const tradeDate = new Date(`${trade}T00:00:00+08:00`)
+  if (Number.isNaN(serverDate.getTime()) || Number.isNaN(tradeDate.getTime())) return false
+  return Math.floor((serverDate - tradeDate) / 86400000) >= 1
+}
+
+function guardStaleTradeDate(sourceLabel = '页面') {
+  if (!isTradeDateStale(serverTime.value, tradeDate.value)) return false
+  notes.value = [`${sourceLabel}数据日期落后于服务器时间，正在自动纠正并重载页面`]
+  setTimeout(() => {
+    resetPageStateAndReload()
+  }, 300)
+  return true
+}
+
 const serverTimeLabel = computed(() => {
   if (!serverTime.value) return '--'
   return serverTime.value.replace('T', ' ').slice(0, 19)
@@ -744,6 +778,7 @@ async function refreshNow() {
     tradeDate.value = data.trade_date || ''
     marketOpen.value = data.market_open
     serverTime.value = data.server_time || ''
+    guardStaleTradeDate('规则列表')
   }
 
   const fetchMarketPayload = async (signal) => {
@@ -814,6 +849,7 @@ async function refreshRowsOnly() {
     tradeDate.value = data.trade_date || ''
     marketOpen.value = data.market_open
     serverTime.value = data.server_time || ''
+    guardStaleTradeDate('规则列表')
   }
 
   const fetchMarketPayload = async (signal) => {
@@ -878,6 +914,7 @@ async function refreshModelTop() {
     tradeDate.value = data.trade_date || tradeDate.value
     marketOpen.value = data.market_open
     serverTime.value = data.server_time || ''
+    guardStaleTradeDate('模型榜单')
     scheduleModelWarmupRetry(data)
   }
 
