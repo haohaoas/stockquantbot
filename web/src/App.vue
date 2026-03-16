@@ -989,7 +989,7 @@ function startAutoRefresh() {
     clearInterval(refreshTimer)
     refreshTimer = null
   }
-  const sec = 5 * 60
+  const sec = 15
   refreshTimer = setInterval(() => {
     if (!isReviewPage.value && marketOpen.value && !loading.value) refreshNow()
   }, sec * 1000)

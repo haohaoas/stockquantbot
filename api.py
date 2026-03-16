@@ -1062,7 +1062,7 @@ def _snapshot_scheduler_loop() -> None:
                     _maybe_schedule_background_refresh(kind=kind, force=True, **kwargs)
         except Exception:
             pass
-        time.sleep(30)
+        time.sleep(5)
 
 
 def _start_snapshot_scheduler() -> None:
