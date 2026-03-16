@@ -792,6 +792,71 @@ async function refreshNow() {
   }
 }
 
+async function refreshRowsOnly() {
+  const requestSeq = ++refreshRequestSeq
+  if (refreshAbortController) {
+    refreshAbortController.abort()
+  }
+  const controller = new AbortController()
+  refreshAbortController = controller
+  const timeoutMs = 30000
+  let timedOut = false
+  const timeoutId = setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, timeoutMs)
+  loading.value = true
+
+  const applyMarketPayload = (data) => {
+    rows.value = data.rows || []
+    notes.value = data.notes || []
+    stats.value = data.stats || {}
+    tradeDate.value = data.trade_date || ''
+    marketOpen.value = data.market_open
+    serverTime.value = data.server_time || ''
+  }
+
+  const fetchMarketPayload = async (signal) => {
+    const url = apiUrl('/api/market-rows')
+    url.searchParams.set('mode', mode.value)
+    url.searchParams.set('provider', provider.value)
+    syncSelectedModelKey()
+    if (modelKey.value) url.searchParams.set('model', modelKey.value)
+    if (modelSector.value) url.searchParams.set('model_sector', modelSector.value)
+    url.searchParams.set('top_n', String(topN.value))
+    url.searchParams.set('only_buy', String(onlyBuy.value))
+    url.searchParams.set('intraday', 'false')
+    url.searchParams.set('_ts', String(Date.now()))
+    const res = await fetch(url, { signal, cache: 'no-store' })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    return await res.json()
+  }
+
+  try {
+    const data = await fetchMarketPayload(controller.signal)
+    if (requestSeq !== refreshRequestSeq) return
+    applyMarketPayload(data)
+  } catch (e) {
+    if (requestSeq !== refreshRequestSeq) return
+    const msg = (e && e.message) ? String(e.message) : 'request failed'
+    if (e && e.name === 'AbortError') {
+      if (timedOut) {
+        notes.value = ['规则列表自动刷新超时，当前仍显示上一版数据']
+      }
+      return
+    }
+    notes.value = [`规则列表自动刷新失败: ${msg}；当前仍显示上一版数据`]
+  } finally {
+    clearTimeout(timeoutId)
+    if (refreshAbortController === controller) {
+      refreshAbortController = null
+    }
+    if (requestSeq === refreshRequestSeq) {
+      loading.value = false
+    }
+  }
+}
+
 async function refreshModelTop() {
   const requestSeq = ++modelRequestSeq
   if (modelAbortController) {
@@ -989,9 +1054,9 @@ function startAutoRefresh() {
     clearInterval(refreshTimer)
     refreshTimer = null
   }
-  const sec = 15
+  const sec = 30
   refreshTimer = setInterval(() => {
-    if (!isReviewPage.value && marketOpen.value && !loading.value) refreshNow()
+    if (!isReviewPage.value && marketOpen.value && !loading.value) refreshRowsOnly()
   }, sec * 1000)
 }
 

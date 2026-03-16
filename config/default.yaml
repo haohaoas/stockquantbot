@@ -8,7 +8,7 @@ use_universe_file: true
 allow_eastmoney_fallback: false
 trade_calendar_file: ./data/trade_calendar.csv
 use_trade_calendar_file: true
-api_cache_sec: 15
+api_cache_sec: 30
 market_scope:
 - sh
 - sz
@@ -296,7 +296,7 @@ output:
   top_n: 20
   out_dir: ./output
   api_cache_sec: 0
-  backend_market_refresh_sec: 15
+  backend_market_refresh_sec: 30
   backend_model_refresh_sec: 300
   backend_model_independent_refresh_sec: 86400
 deepseek:
