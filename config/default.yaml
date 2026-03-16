@@ -275,7 +275,7 @@ decision:
       allow_weak_breakout: true
       require_bollinger_breakout: true
   intraday_v2:
-    enabled: true
+    enabled: false
     minute_dir: ./data/manual_minute
     interval: m5
     only_today: false
