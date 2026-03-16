@@ -504,6 +504,40 @@ def _refresh_model_top_quotes(
     return out
 
 
+def _refresh_market_rows_quotes(
+    payload: dict[str, Any],
+    *,
+    params: dict,
+) -> dict[str, Any]:
+    rows = payload.get("rows") or []
+    if not isinstance(rows, list) or not rows:
+        return dict(payload)
+
+    df = pd.DataFrame(rows)
+    if df.empty or "symbol" not in df.columns:
+        return dict(payload)
+
+    signals_cfg = params.get("signals", {}) or {}
+    provider = str(signals_cfg.get("realtime_provider", "auto") or "auto").strip().lower()
+    use_proxy = bool(signals_cfg.get("use_proxy", False))
+    proxy = str(signals_cfg.get("proxy", "") or "")
+
+    try:
+        refreshed = app_module.refresh_realtime_for_view(
+            df,
+            use_proxy=use_proxy,
+            proxy=proxy,
+            max_rows=len(df),
+            provider=provider,
+        )
+    except Exception:
+        refreshed = df
+
+    out = dict(payload)
+    out["rows"] = _df_to_records(refreshed)
+    return out
+
+
 def _compute_market_snapshot(
     *,
     mode: str,
@@ -1165,12 +1199,14 @@ def get_market_rows(
     cached = _get_market_cache(cache_key, cache_ttl)
     if cached is not None:
         payload = _market_rows_only_payload(cached)
+        payload = _refresh_market_rows_quotes(payload, params=params)
         return _enrich_runtime_payload(payload, market_open=market_open, now_cn=now_cn, extra_note=f"缓存命中({cache_ttl}s)")
 
     entry = _get_market_cache_entry(cache_key)
     if entry is not None and entry.get("data"):
         note = "展示缓存快照，后台调度刷新中" if _snapshot_refresh_running(cache_key) else "展示缓存快照，等待后台调度刷新"
         payload = _market_rows_only_payload(entry["data"])
+        payload = _refresh_market_rows_quotes(payload, params=params)
         return _enrich_runtime_payload(payload, market_open=market_open, now_cn=now_cn, extra_note=note)
 
     fallback = _find_market_fallback_entry(
@@ -1199,6 +1235,7 @@ def get_market_rows(
             defer_sec=0.25,
         )
         payload = _market_rows_only_payload(fallback[0])
+        payload = _refresh_market_rows_quotes(payload, params=params)
         return _enrich_runtime_payload(payload, market_open=market_open, now_cn=now_cn)
 
     payload, _, _, _, _ = _compute_market_snapshot(
@@ -1213,6 +1250,7 @@ def get_market_rows(
     )
     _set_market_cache(cache_key, payload)
     payload = _market_rows_only_payload(payload)
+    payload = _refresh_market_rows_quotes(payload, params=params)
     return _enrich_runtime_payload(payload, market_open=market_open, now_cn=now_cn)
 
 
