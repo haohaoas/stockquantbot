@@ -1381,6 +1381,21 @@ def compute_market(params: dict) -> dict:
     hot_filter_strict = bool(sector_cfg.get("hot_filter_strict", True))
 
     preselect_n = int(signals_cfg.get("preselect_n", 300))
+    dynamic_preselect_expand = bool(signals_cfg.get("dynamic_preselect_expand", False))
+    dynamic_preselect_buy_min = max(0, int(signals_cfg.get("dynamic_preselect_buy_min", 1) or 0))
+    dynamic_preselect_steps_raw = signals_cfg.get("dynamic_preselect_steps", [preselect_n, 600, 1000]) or [preselect_n]
+    dynamic_preselect_steps: list[int] = []
+    for step in dynamic_preselect_steps_raw:
+        try:
+            step_n = int(step or 0)
+        except Exception:
+            continue
+        if step_n <= 0:
+            continue
+        dynamic_preselect_steps.append(step_n)
+    if preselect_n not in dynamic_preselect_steps:
+        dynamic_preselect_steps.insert(0, preselect_n)
+    dynamic_preselect_steps = sorted({max(preselect_n, x) for x in dynamic_preselect_steps})
     preselect_cache_enabled = bool(signals_cfg.get("preselect_cache", False))
     preselect_cache_ttl_sec = int(signals_cfg.get("preselect_cache_ttl_sec", 0))
     preselect_cache_file = str(signals_cfg.get("preselect_cache_file", "./cache/preselect_symbols.json"))
@@ -1803,14 +1818,63 @@ def compute_market(params: dict) -> dict:
         except Exception:
             pass
 
-    try:
+    def _build_model_top_from_score(score: pd.Series | None, factors_rule: pd.DataFrame | None) -> pd.DataFrame:
+        if not isinstance(score, pd.Series) or score.empty:
+            return pd.DataFrame()
+        sector_map_file = str(sector_cfg.get("map_file", "./data/sector_map.csv"))
+        sector_mapping = load_sector_map(sector_map_file)
+        name_map = _load_universe_name_map(universe_file)
+        fr = (
+            factors_rule.set_index("symbol")
+            if factors_rule is not None and not factors_rule.empty and "symbol" in factors_rule.columns
+            else pd.DataFrame()
+        )
+        model_rows = []
+        for sym, sc in score.sort_values(ascending=False).head(top_n).items():
+            sym = str(sym).zfill(6)
+            name = name_map.get(sym, "")
+            close = float("nan")
+            pct = float("nan")
+            pct_source = "hist"
+            if not fr.empty and sym in fr.index:
+                rr = fr.loc[sym]
+                if isinstance(rr, pd.DataFrame):
+                    rr = rr.iloc[0]
+                name = str(rr.get("name", name) or name)
+                close = float(pd.to_numeric(rr.get("close", float("nan")), errors="coerce"))
+                pct = float(pd.to_numeric(rr.get("pct_chg", float("nan")), errors="coerce"))
+                pct_source = str(rr.get("pct_source", "spot") or "spot")
+            if not (close == close and close > 0):
+                close, pct_hist = _load_manual_last_quote(manual_hist_dir, sym)
+                if not (pct == pct):
+                    pct = pct_hist
+                pct_source = "hist"
+            sec = sector_mapping.get(sym, "") if sector_mapping else ""
+            model_rows.append(
+                {
+                    "symbol": sym,
+                    "name": name,
+                    "sector": sec,
+                    "model_score": float(sc),
+                    "close": close,
+                    "pct_chg": pct,
+                    "pct_source": pct_source,
+                }
+            )
+        return pd.DataFrame(model_rows)
+
+    def _run_rule_pipeline(current_spot_rule: pd.DataFrame, current_preselect_n: int) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame | None, pd.Series | None, list[str]]:
+        attempt_notes: list[str] = []
+        score = None
+
         t_factors = time.time()
-        rule_syms = set(spot_rule["symbol"].astype(str).str.zfill(6).tolist()) if not spot_rule.empty else set()
-        factors_rule = build_factors(spot_rule, signals_cfg, trade_date, stats=stats)
-        if factors_rule is not None and not factors_rule.empty:
-            factors_rule["symbol"] = factors_rule["symbol"].astype(str).str.zfill(6)
-            factors_rule = _sanitize_factor_frame(factors_rule, notes, stage="因子清洗")
-        stats["time_factors_ms"] = round((time.time() - t_factors) * 1000, 2)
+        rule_syms = set(current_spot_rule["symbol"].astype(str).str.zfill(6).tolist()) if not current_spot_rule.empty else set()
+        current_factors_rule = build_factors(current_spot_rule, signals_cfg, trade_date, stats=stats)
+        if current_factors_rule is not None and not current_factors_rule.empty:
+            current_factors_rule["symbol"] = current_factors_rule["symbol"].astype(str).str.zfill(6)
+            current_factors_rule = _sanitize_factor_frame(current_factors_rule, attempt_notes, stage="因子清洗")
+        stats["time_factors_ms"] = round(float(stats.get("time_factors_ms", 0.0)) + (time.time() - t_factors) * 1000, 2)
+
         if model_ref_enabled and model_ref_path:
             t_model = time.time()
             m = load_ref_model(model_ref_path)
@@ -1821,7 +1885,7 @@ def compute_market(params: dict) -> dict:
             symbols_for_model: list[str] = []
             if is_watchlist:
                 symbols_for_model = sorted(rule_syms)
-                notes.append(f"模型榜单候选(自选): {len(symbols_for_model)}")
+                attempt_notes.append(f"模型榜单候选(自选): {len(symbols_for_model)}")
             elif model_independent:
                 symbols_for_model = _list_manual_hist_symbols(manual_hist_dir)
                 before_candidate = len(symbols_for_model)
@@ -1846,17 +1910,17 @@ def compute_market(params: dict) -> dict:
                     symbols_for_model = filtered
                 if model_candidate_max_symbols > 0:
                     symbols_for_model = symbols_for_model[:model_candidate_max_symbols]
-                notes.append(
+                attempt_notes.append(
                     f"模型榜单候选(独立同池): {len(symbols_for_model)} "
                     f"(raw={before_candidate}, st_removed={st_removed})"
                 )
             elif model_candidate_mode in ("rule_shared", "shared", "rule"):
                 symbols_for_model = sorted(rule_syms)
-                notes.append(f"模型榜单候选(规则同池): {len(symbols_for_model)}")
+                attempt_notes.append(f"模型榜单候选(规则同池): {len(symbols_for_model)}")
             elif model_candidate_mode == "amount_topn":
-                spot_model = _preselect_by_amount(spot_base, preselect_n)
+                spot_model = _preselect_by_amount(spot_base, current_preselect_n)
                 symbols_for_model = sorted(set(spot_model["symbol"].astype(str).str.zfill(6).tolist())) if not spot_model.empty else []
-                notes.append(f"模型榜单候选(原版成交额TopN): {len(symbols_for_model)}")
+                attempt_notes.append(f"模型榜单候选(原版成交额TopN): {len(symbols_for_model)}")
             else:
                 symbols_for_model = _list_manual_hist_symbols(manual_hist_dir)
                 before_candidate = len(symbols_for_model)
@@ -1881,7 +1945,7 @@ def compute_market(params: dict) -> dict:
                     symbols_for_model = filtered
                 if model_candidate_max_symbols > 0:
                     symbols_for_model = symbols_for_model[:model_candidate_max_symbols]
-                notes.append(
+                attempt_notes.append(
                     f"模型榜单候选(回测同池): {len(symbols_for_model)} "
                     f"(raw={before_candidate}, st_removed={st_removed})"
                 )
@@ -1889,7 +1953,7 @@ def compute_market(params: dict) -> dict:
             minute_model_max_symbols = int(model_ref_cfg.get("minute_max_symbols", 0) or 0)
             if is_minute_model and minute_model_max_symbols > 0 and len(symbols_for_model) > minute_model_max_symbols:
                 symbols_for_model = symbols_for_model[:minute_model_max_symbols]
-                notes.append(f"分钟模型候选限流: {len(symbols_for_model)} (max={minute_model_max_symbols})")
+                attempt_notes.append(f"分钟模型候选限流: {len(symbols_for_model)} (max={minute_model_max_symbols})")
 
             if model_sector_filter and symbols_for_model:
                 kws = _parse_sector_keywords(model_sector_filter)
@@ -1902,9 +1966,9 @@ def compute_market(params: dict) -> dict:
                         if _is_target_sector(sector_mapping.get(sym6, ""), kws):
                             filtered_syms.append(sym6)
                     symbols_for_model = filtered_syms
-                    notes.append(f"模型板块过滤: {len(symbols_for_model)}/{before}")
+                    attempt_notes.append(f"模型板块过滤: {len(symbols_for_model)}/{before}")
                 elif kws and not sector_mapping:
-                    notes.append("模型板块过滤: 板块映射缺失，已跳过。")
+                    attempt_notes.append("模型板块过滤: 板块映射缺失，已跳过。")
 
             cache_key = f"{Path(model_ref_path).stem}_{trade_date}"
             cache_path = str(Path(model_cache_dir) / f"{cache_key}.csv")
@@ -1921,19 +1985,20 @@ def compute_market(params: dict) -> dict:
                     if cached_scores is not None:
                         _model_cache_set(cache_key, cached_scores)
                 if is_minute_model:
-                    notes.append(f"分钟模型缓存: {effective_model_cache_ttl}s")
+                    attempt_notes.append(f"分钟模型缓存: {effective_model_cache_ttl}s")
             elif is_minute_model:
-                notes.append("分钟模型缓存: 关闭")
+                attempt_notes.append("分钟模型缓存: 关闭")
 
             missing_syms = []
             if cached_scores is not None and symbols_for_model:
                 missing_syms = [s for s in symbols_for_model if s not in cached_scores.index]
                 if missing_syms:
-                    notes.append(f"模型分缓存命中: {len(symbols_for_model) - len(missing_syms)}/{len(symbols_for_model)}，补算 {len(missing_syms)}")
+                    attempt_notes.append(
+                        f"模型分缓存命中: {len(symbols_for_model) - len(missing_syms)}/{len(symbols_for_model)}，补算 {len(missing_syms)}"
+                    )
                 else:
-                    notes.append(f"模型分缓存命中: {len(symbols_for_model)}")
+                    attempt_notes.append(f"模型分缓存命中: {len(symbols_for_model)}")
 
-            score = None
             if cached_scores is None or missing_syms:
                 if m:
                     model_signals_cfg = dict(signals_cfg)
@@ -1941,11 +2006,11 @@ def compute_market(params: dict) -> dict:
                     if model_task == "minute_cls":
                         if len(target_syms) > 120 and not bool(model_signals_cfg.get("minute_live_only_missing_today", False)):
                             model_signals_cfg["minute_live_only_missing_today"] = True
-                            notes.append("分钟模型提速: 仅补齐缺失当日分钟线")
+                            attempt_notes.append("分钟模型提速: 仅补齐缺失当日分钟线")
                         live_cap = int(model_signals_cfg.get("minute_live_max_symbols", 0) or 0)
                         if len(target_syms) > 120 and (live_cap <= 0 or live_cap > 200):
                             model_signals_cfg["minute_live_max_symbols"] = 200
-                            notes.append("分钟模型提速: 实时拉取上限=200")
+                            attempt_notes.append("分钟模型提速: 实时拉取上限=200")
                         model_feats = build_minute_ref_features(
                             target_syms,
                             m,
@@ -1966,9 +2031,9 @@ def compute_market(params: dict) -> dict:
                     if not model_feats.empty:
                         score = predict_ref_score(model_feats, m)
                     if score is None:
-                        notes.append("模型参考分不可用（特征缺失或异常）。")
+                        attempt_notes.append("模型参考分不可用（特征缺失或异常）。")
                 else:
-                    notes.append("模型参考分不可用（模型文件缺失或加载失败）。")
+                    attempt_notes.append("模型参考分不可用（模型文件缺失或加载失败）。")
 
             if cached_scores is not None:
                 score_series = cached_scores.copy()
@@ -1987,74 +2052,36 @@ def compute_market(params: dict) -> dict:
 
             if isinstance(score, pd.Series) and not score.empty:
                 score.index = score.index.astype(str).str.zfill(6)
-                if factors_rule is not None and not factors_rule.empty:
-                    factors_rule = factors_rule.merge(
+                if current_factors_rule is not None and not current_factors_rule.empty:
+                    current_factors_rule = current_factors_rule.merge(
                         score.rename("model_score"),
                         left_on="symbol",
                         right_index=True,
                         how="left",
                     )
-                    factors_rule = _sanitize_factor_frame(factors_rule, notes, stage="模型合并清洗")
-                notes.append("模型参考分已生成（仅作参考，不参与评分）。")
-                top_scores = score.sort_values(ascending=False).head(top_n)
-                name_map = _load_universe_name_map(universe_file)
-                fr = factors_rule.set_index("symbol") if factors_rule is not None and not factors_rule.empty and "symbol" in factors_rule.columns else pd.DataFrame()
-                model_rows = []
-                for sym, sc in top_scores.items():
-                    sym = str(sym).zfill(6)
-                    name = name_map.get(sym, "")
-                    close = float("nan")
-                    pct = float("nan")
-                    pct_source = "hist"
-                    if not fr.empty and sym in fr.index:
-                        rr = fr.loc[sym]
-                        if isinstance(rr, pd.DataFrame):
-                            rr = rr.iloc[0]
-                        name = str(rr.get("name", name) or name)
-                        close = float(pd.to_numeric(rr.get("close", float("nan")), errors="coerce"))
-                        pct = float(pd.to_numeric(rr.get("pct_chg", float("nan")), errors="coerce"))
-                        pct_source = str(rr.get("pct_source", "spot") or "spot")
-                    if not (close == close and close > 0):
-                        close, pct_hist = _load_manual_last_quote(manual_hist_dir, sym)
-                        if pct == pct:
-                            pass
-                        else:
-                            pct = pct_hist
-                        pct_source = "hist"
-                    sec = sector_mapping.get(sym, "") if sector_mapping else ""
-                    model_rows.append(
-                        {
-                            "symbol": sym,
-                            "name": name,
-                            "sector": sec,
-                            "model_score": float(sc),
-                            "close": close,
-                            "pct_chg": pct,
-                            "pct_source": pct_source,
-                        }
-                    )
-                model_top = pd.DataFrame(model_rows)
-            stats["time_model_ms"] = round((time.time() - t_model) * 1000, 2)
+                    current_factors_rule = _sanitize_factor_frame(current_factors_rule, attempt_notes, stage="模型合并清洗")
+                attempt_notes.append("模型参考分已生成（仅作参考，不参与评分）。")
+            stats["time_model_ms"] = round(float(stats.get("time_model_ms", 0.0)) + (time.time() - t_model) * 1000, 2)
 
         t_score = time.time()
         if pause_signals:
             ranked_full = pd.DataFrame()
         else:
-            factors_rule = _sanitize_factor_frame(factors_rule, notes, stage="评分前清洗")
-            factors_for_rule = _apply_profile_filters(factors_rule, decision_cfg, notes)
+            current_factors_rule = _sanitize_factor_frame(current_factors_rule, attempt_notes, stage="评分前清洗")
+            factors_for_rule = _apply_profile_filters(current_factors_rule, decision_cfg, attempt_notes)
             if sector_cfg.get("enabled"):
                 map_file = str(sector_cfg.get("map_file", "./data/sector_map.csv"))
                 factors_for_rule = apply_sector_map(factors_for_rule, map_file)
                 if "sector" in factors_for_rule.columns and factors_for_rule["sector"].astype(str).str.len().gt(0).any():
-                    notes.append("板块映射: 已加载")
+                    attempt_notes.append("板块映射: 已加载")
                 else:
-                    notes.append("板块映射: 未命中")
+                    attempt_notes.append("板块映射: 未命中")
                 if hot_set and "sector" in factors_for_rule.columns:
                     factors_for_rule["hot_sector"] = factors_for_rule["sector"].apply(lambda x: 1 if _is_hot_sector(x, hot_set) else 0)
             ranked_full = score_and_rank(
                 factors_for_rule,
                 weights,
-                top_n=preselect_n,
+                top_n=current_preselect_n,
                 sector_cfg=sector_cfg,
                 decision_cfg=decision_cfg,
             )
@@ -2067,12 +2094,12 @@ def compute_market(params: dict) -> dict:
                     now_cn = dt.datetime.now(tz=ZoneInfo("Asia/Shanghai"))
                     if not _is_market_open_cn(now_cn):
                         intraday_cfg["no_data_action"] = no_data_after_close
-                        notes.append(f"分钟V2无数据动作(收盘后): {no_data_after_close}")
+                        attempt_notes.append(f"分钟V2无数据动作(收盘后): {no_data_after_close}")
                 buy_before = int((ranked_full["action"] == "BUY").sum()) if "action" in ranked_full.columns else 0
                 ranked_full = apply_intraday_v2(ranked_full, intraday_cfg)
                 buy_after = int((ranked_full["action"] == "BUY").sum()) if "action" in ranked_full.columns else 0
-                notes.append(f"分钟V2过滤: BUY {buy_before}->{buy_after}")
-        # Model vs rule conflict handling (downgrade to WATCH).
+                attempt_notes.append(f"分钟V2过滤: BUY {buy_before}->{buy_after}")
+
         conflict_cfg = decision_cfg.get("model_conflict") or {}
         if conflict_cfg.get("enabled") and "model_score" in ranked_full.columns and "score" in ranked_full.columns:
             ms = pd.to_numeric(ranked_full["model_score"], errors="coerce")
@@ -2091,7 +2118,7 @@ def compute_market(params: dict) -> dict:
                                 lambda x: reason_add if (not x or x == "nan") else (x if reason_add in x else f"{x}; {reason_add}")
                             )
                         )
-                    notes.append(
+                    attempt_notes.append(
                         f"模型冲突降级: model>={model_min:.2f} 且 score<{rule_max:.1f} -> WATCH ({int(conflict_mask.sum())})"
                     )
         if model_ref_filter_enabled:
@@ -2110,30 +2137,30 @@ def compute_market(params: dict) -> dict:
                             )
                         )
                 if bw_mask.any():
-                    notes.append(
+                    attempt_notes.append(
                         f"模型过滤: 阈值>= {model_ref_min_score:.2f}, BUY/WATCH保留 {int(ok_mask.sum())}/{int(bw_mask.sum())}"
                     )
             else:
-                notes.append("模型过滤启用但未生成模型分或动作列，已跳过。")
+                attempt_notes.append("模型过滤启用但未生成模型分或动作列，已跳过。")
         if exclude_limit_up and "pct_chg" in ranked_full.columns:
             ranked_full = ranked_full[pd.to_numeric(ranked_full["pct_chg"], errors="coerce") < limit_up_pct].reset_index(drop=True)
 
         if "pct_source" in ranked_full.columns:
             src_counts = ranked_full["pct_source"].value_counts().to_dict()
-            notes.append("涨跌幅来源统计: " + ", ".join(f"{k}={v}" for k, v in src_counts.items()))
+            attempt_notes.append("涨跌幅来源统计: " + ", ".join(f"{k}={v}" for k, v in src_counts.items()))
 
             if exclude_non_realtime_pct:
                 filtered = ranked_full[ranked_full["pct_source"].isin(["spot", "spot_calc", "spot_fix"])].reset_index(drop=True)
                 if filtered.empty and not ranked_full.empty:
-                    notes.append("实时涨跌幅不可用，已保留历史/估算数据。")
+                    attempt_notes.append("实时涨跌幅不可用，已保留历史/估算数据。")
                 else:
                     ranked_full = filtered
             elif is_watchlist:
-                notes.append("自选模式保留非实时涨跌幅（可勾选“排除非实时涨跌幅”过滤）。")
-        stats["time_score_ms"] = round((time.time() - t_score) * 1000, 2)
+                attempt_notes.append("自选模式保留非实时涨跌幅（可勾选“排除非实时涨跌幅”过滤）。")
+        stats["time_score_ms"] = round(float(stats.get("time_score_ms", 0.0)) + (time.time() - t_score) * 1000, 2)
         ranked_main = ranked_full.head(top_n).copy()
 
-        ranked = ranked_main
+        ranked_out = ranked_main
         if "model_score" in ranked_full.columns:
             ms = pd.to_numeric(ranked_full["model_score"], errors="coerce")
             extra = ranked_full[(ms >= model_ref_show_min)].copy()
@@ -2145,8 +2172,53 @@ def compute_market(params: dict) -> dict:
                         extra["reason"] = extra["reason"].fillna("").astype(str).apply(
                             lambda x: reason_add if (not x or x == "nan") else (x if reason_add in x else f"{x}; {reason_add}")
                         )
-                    ranked = pd.concat([ranked_main, extra], ignore_index=True)
-                    notes.append(f"模型强信号追加: {len(extra)} 条 (阈值>={model_ref_show_min:.2f})")
+                    ranked_out = pd.concat([ranked_main, extra], ignore_index=True)
+                    attempt_notes.append(f"模型强信号追加: {len(extra)} 条 (阈值>={model_ref_show_min:.2f})")
+
+        return ranked_out, ranked_full, current_factors_rule, score, attempt_notes
+
+    try:
+        expand_enabled = dynamic_preselect_expand and (not is_watchlist) and (not model_top_only) and (not pause_signals)
+        candidate_sizes = dynamic_preselect_steps if expand_enabled else [preselect_n]
+        chosen_preselect_n = preselect_n
+        chosen_spot_rule = spot_rule
+        chosen_factors_rule = pd.DataFrame()
+        chosen_score = None
+        chosen_notes: list[str] = []
+        ranked_full = pd.DataFrame()
+
+        for attempt_idx, current_n in enumerate(candidate_sizes):
+            preselect_notes: list[str] = []
+            if attempt_idx == 0:
+                current_spot_rule = spot_rule
+            else:
+                current_spot_rule = _preselect_spot(spot_base, current_n, signals_cfg, preselect_notes)
+                if len(current_spot_rule) < current_n:
+                    preselect_notes.append(f"预筛后候选不足: {len(current_spot_rule)}/{current_n}（可能由基础过滤或板块排除导致）")
+
+            ranked_candidate, ranked_full_candidate, factors_candidate, score_candidate, attempt_notes = _run_rule_pipeline(current_spot_rule, current_n)
+            buy_count = int((ranked_full_candidate["action"] == "BUY").sum()) if "action" in ranked_full_candidate.columns else 0
+            chosen_preselect_n = current_n
+            chosen_spot_rule = current_spot_rule
+            chosen_factors_rule = factors_candidate
+            ranked = ranked_candidate
+            ranked_full = ranked_full_candidate
+            chosen_score = score_candidate
+            chosen_notes = preselect_notes + attempt_notes
+
+            if buy_count >= dynamic_preselect_buy_min or attempt_idx == len(candidate_sizes) - 1:
+                if current_n > preselect_n:
+                    notes.append(f"动态扩池结果: 预选={current_n}, BUY={buy_count}")
+                break
+
+            next_n = candidate_sizes[attempt_idx + 1]
+            notes.append(f"动态扩池: BUY={buy_count}，预选 {current_n}->{next_n}")
+
+        stats["after_preselect"] = int(len(chosen_spot_rule))
+        stats["after_preselect_target"] = int(chosen_preselect_n)
+        notes.extend(chosen_notes)
+        if isinstance(chosen_score, pd.Series) and not chosen_score.empty:
+            model_top = _build_model_top_from_score(chosen_score, chosen_factors_rule)
     except Exception as e:
         notes.append(f"因子/评分失败: {e}")
         tb_lines = [line.strip() for line in traceback.format_exc(limit=8).splitlines() if line.strip()]

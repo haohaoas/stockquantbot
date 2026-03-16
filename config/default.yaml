@@ -27,6 +27,9 @@ features:
   set: compact
 signals:
   preselect_n: 300
+  dynamic_preselect_expand: true
+  dynamic_preselect_buy_min: 1
+  dynamic_preselect_steps: [300, 600, 1000]
   preselect_layered: true
   preselect_layer_col: mkt_cap
   preselect_layer_bins: [0, 30000000000, 100000000000, 300000000000]
