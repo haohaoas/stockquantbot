@@ -14,7 +14,7 @@ from typing import Any
 
 import pandas as pd
 import requests
-from fastapi import FastAPI, Body, Query
+from fastapi import FastAPI, Body, Query, Request
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -35,6 +35,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def disable_api_http_cache(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
 
 _WEB_DIST_DIR = Path(__file__).resolve().parent / "web" / "dist"
 _WEB_INDEX_FILE = _WEB_DIST_DIR / "index.html"

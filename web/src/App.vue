@@ -9,6 +9,7 @@
         <div class="chip" :class="marketOpen ? 'open' : 'closed'">
           {{ marketOpen ? '交易中' : '已休市' }}
         </div>
+        <div class="chip muted">交易日 {{ tradeDateLabel }}</div>
         <div class="chip muted">{{ serverTimeLabel }}</div>
       </div>
     </header>
@@ -390,6 +391,7 @@ const onlyBuy = ref(false)
 const topN = ref(20)
 const marketOpen = ref(false)
 const serverTime = ref('')
+const tradeDate = ref('')
 const watchlist = ref([])
 const watchlistInput = ref('')
 const newsItems = ref([])
@@ -454,6 +456,10 @@ function apiUrl(path) {
 const serverTimeLabel = computed(() => {
   if (!serverTime.value) return '--'
   return serverTime.value.replace('T', ' ').slice(0, 19)
+})
+
+const tradeDateLabel = computed(() => {
+  return tradeDate.value || '--'
 })
 
 const perfLabel = computed(() => {
@@ -735,6 +741,7 @@ async function refreshNow() {
     rows.value = data.rows || []
     notes.value = data.notes || []
     stats.value = data.stats || {}
+    tradeDate.value = data.trade_date || ''
     marketOpen.value = data.market_open
     serverTime.value = data.server_time || ''
   }
@@ -749,7 +756,8 @@ async function refreshNow() {
     url.searchParams.set('top_n', String(topN.value))
     url.searchParams.set('only_buy', String(onlyBuy.value))
     url.searchParams.set('intraday', 'false')
-    const res = await fetch(url, { signal })
+    url.searchParams.set('_ts', String(Date.now()))
+    const res = await fetch(url, { signal, cache: 'no-store' })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     return await res.json()
   }
@@ -765,11 +773,11 @@ async function refreshNow() {
     const msg = (e && e.message) ? String(e.message) : 'request failed'
     if (e && e.name === 'AbortError') {
       if (timedOut) {
-        notes.value = ['规则列表请求超时，请稍后重试']
+        notes.value = ['规则列表请求超时，当前仍显示上一版数据']
       }
       return
     }
-    notes.value = [`请求失败: ${msg}`]
+    notes.value = [`请求失败: ${msg}；当前仍显示上一版数据`]
   } finally {
     clearTimeout(timeoutId)
     if (refreshAbortController === controller) {
@@ -802,6 +810,7 @@ async function refreshModelTop() {
   const applyModelPayload = (data) => {
     modelTop.value = data.model_top || []
     modelNotes.value = data.notes || []
+    tradeDate.value = data.trade_date || tradeDate.value
     marketOpen.value = data.market_open
     serverTime.value = data.server_time || ''
     scheduleModelWarmupRetry(data)
@@ -817,7 +826,8 @@ async function refreshModelTop() {
     if (modelSector.value) url.searchParams.set('model_sector', modelSector.value)
     url.searchParams.set('top_n', String(topN.value))
     url.searchParams.set('intraday', 'false')
-    const res = await fetch(url, { signal })
+    url.searchParams.set('_ts', String(Date.now()))
+    const res = await fetch(url, { signal, cache: 'no-store' })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     return await res.json()
   }
