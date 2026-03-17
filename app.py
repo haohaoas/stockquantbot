@@ -287,6 +287,144 @@ def _load_manual_last_quote(manual_hist_dir: str, symbol: str) -> tuple[float, f
     return close, pct
 
 
+def _load_manual_hist_tail(manual_hist_dir: str, symbol: str, tail_rows: int = 80) -> pd.DataFrame:
+    p = Path(manual_hist_dir) / f"{str(symbol).zfill(6)}.csv"
+    if not p.exists():
+        return pd.DataFrame()
+    try:
+        df = pd.read_csv(p)
+    except Exception:
+        return pd.DataFrame()
+    if df.empty:
+        return pd.DataFrame()
+    keep = [c for c in ["date", "open", "close", "volume", "turnover_rate"] if c in df.columns]
+    if not keep:
+        return pd.DataFrame()
+    out = df[keep].copy()
+    for c in ("open", "close", "volume", "turnover_rate"):
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce")
+    if tail_rows > 0 and len(out) > tail_rows:
+        out = out.tail(tail_rows).copy()
+    return out.reset_index(drop=True)
+
+
+def _compute_model_risk_features(
+    symbols: list[str],
+    *,
+    manual_hist_dir: str,
+    factors_rule: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    rows: list[dict[str, float | str]] = []
+    fr = (
+        factors_rule.set_index("symbol")
+        if factors_rule is not None and not factors_rule.empty and "symbol" in factors_rule.columns
+        else pd.DataFrame()
+    )
+    for sym in symbols:
+        sym6 = str(sym).zfill(6)
+        turnover_ratio = float("nan")
+        high_turnover_risk = float("nan")
+        volume_ratio_5 = float("nan")
+
+        if not fr.empty and sym6 in fr.index:
+            rr = fr.loc[sym6]
+            if isinstance(rr, pd.DataFrame):
+                rr = rr.iloc[0]
+            volume_ratio_5 = float(pd.to_numeric(rr.get("volume_ratio_5", float("nan")), errors="coerce"))
+
+        hist = _load_manual_hist_tail(manual_hist_dir, sym6, tail_rows=90)
+        if not hist.empty:
+            if "volume" in hist.columns:
+                vol = pd.to_numeric(hist["volume"], errors="coerce")
+                vr5 = vol / vol.rolling(5, min_periods=5).mean().shift(1)
+                latest_vr5 = pd.to_numeric(vr5.iloc[-1], errors="coerce")
+                if pd.notna(latest_vr5):
+                    volume_ratio_5 = float(latest_vr5)
+            if "turnover_rate" in hist.columns:
+                turn = pd.to_numeric(hist["turnover_rate"], errors="coerce")
+                tr20 = turn.rolling(20, min_periods=20).mean().shift(1)
+                q90_60 = turn.rolling(60, min_periods=40).quantile(0.9).shift(1)
+                latest_turn = pd.to_numeric(turn.iloc[-1], errors="coerce")
+                latest_tr20 = pd.to_numeric(tr20.iloc[-1], errors="coerce")
+                latest_q90 = pd.to_numeric(q90_60.iloc[-1], errors="coerce")
+                if pd.notna(latest_turn) and pd.notna(latest_tr20) and float(latest_tr20) > 0:
+                    turnover_ratio = float(latest_turn / latest_tr20)
+                if pd.notna(latest_turn) and pd.notna(latest_q90):
+                    high_turnover_risk = float(latest_turn > latest_q90)
+
+        rows.append(
+            {
+                "symbol": sym6,
+                "turnover_ratio": turnover_ratio,
+                "high_turnover_risk": high_turnover_risk,
+                "volume_ratio_5": volume_ratio_5,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _apply_model_risk_penalty(
+    score: pd.Series | None,
+    *,
+    top_n: int,
+    candidate_n: int,
+    manual_hist_dir: str,
+    factors_rule: pd.DataFrame | None,
+    penalty_cfg: dict,
+    notes: list[str],
+) -> pd.Series | None:
+    if score is None or score.empty:
+        return score
+    if not bool(penalty_cfg.get("enabled", False)):
+        return score
+
+    pool_n = max(int(candidate_n or top_n), int(top_n))
+    pool = score.sort_values(ascending=False).head(pool_n)
+    risk_df = _compute_model_risk_features(pool.index.astype(str).tolist(), manual_hist_dir=manual_hist_dir, factors_rule=factors_rule)
+    if risk_df.empty:
+        notes.append("模型风险惩罚: 风险因子为空，已跳过")
+        return pool
+
+    risk_df = risk_df.set_index("symbol")
+    out = pd.DataFrame({"model_score": pool.astype(float)})
+    out = out.join(risk_df, how="left")
+
+    tr_rank = pd.to_numeric(out["turnover_ratio"], errors="coerce").rank(pct=True)
+    vr_rank = pd.to_numeric(out["volume_ratio_5"], errors="coerce").rank(pct=True)
+    hot = pd.to_numeric(out["high_turnover_risk"], errors="coerce")
+
+    out["turnover_ratio_rank"] = tr_rank.fillna(0.0)
+    out["volume_ratio_5_rank"] = vr_rank.fillna(0.0)
+    out["high_turnover_risk"] = hot.fillna(0.0).clip(lower=0.0, upper=1.0)
+
+    w_turn = float(penalty_cfg.get("turnover_ratio_weight", 0.45) or 0.45)
+    w_hot = float(penalty_cfg.get("high_turnover_weight", 0.35) or 0.35)
+    w_vol = float(penalty_cfg.get("volume_ratio_weight", 0.20) or 0.20)
+    penalty_factor = float(penalty_cfg.get("penalty_factor", 0.08) or 0.08)
+    hard_filter_high = bool(penalty_cfg.get("hard_filter_high_turnover", False))
+
+    out["risk_score"] = (
+        out["turnover_ratio_rank"] * w_turn
+        + out["high_turnover_risk"] * w_hot
+        + out["volume_ratio_5_rank"] * w_vol
+    )
+    out["final_score"] = out["model_score"] - penalty_factor * out["risk_score"]
+
+    if hard_filter_high:
+        before = len(out)
+        out = out[out["high_turnover_risk"] < 0.5].copy()
+        notes.append(f"模型风险硬过滤: high_turnover_risk 过滤 {before-len(out)}")
+
+    notes.append(
+        "模型风险惩罚: "
+        f"pool={len(pool)}, penalty={penalty_factor:.3f}, "
+        f"w(turnover_ratio/high_turnover/volume_ratio_5)="
+        f"{w_turn:.2f}/{w_hot:.2f}/{w_vol:.2f}"
+    )
+    return out["final_score"].sort_values(ascending=False)
+
+
 def _to_symbol_list(val) -> list[str]:
     if isinstance(val, str):
         return [s.strip().zfill(6) for s in val.split(",") if str(s).strip()]
@@ -303,10 +441,23 @@ def _build_model_top_rows(
     manual_hist_dir: str,
     sector_mapping: dict[str, str] | None = None,
     factors_rule: pd.DataFrame | None = None,
+    candidate_n: int | None = None,
+    risk_penalty_cfg: dict | None = None,
+    notes: list[str] | None = None,
 ) -> pd.DataFrame:
     if score is None or score.empty:
         return pd.DataFrame()
-    top_scores = score.sort_values(ascending=False).head(top_n)
+    local_notes = notes if notes is not None else []
+    effective_score = _apply_model_risk_penalty(
+        score,
+        top_n=top_n,
+        candidate_n=int(candidate_n or max(top_n, 100)),
+        manual_hist_dir=manual_hist_dir,
+        factors_rule=factors_rule,
+        penalty_cfg=dict(risk_penalty_cfg or {}),
+        notes=local_notes,
+    )
+    top_scores = (effective_score if isinstance(effective_score, pd.Series) and not effective_score.empty else score).sort_values(ascending=False).head(top_n)
     name_map = _load_universe_name_map(universe_file)
     fr = (
         factors_rule.set_index("symbol")
@@ -335,15 +486,16 @@ def _build_model_top_rows(
             pct_source = "hist"
         sec = sector_mapping.get(sym, "") if sector_mapping else ""
         model_rows.append(
-            {
-                "symbol": sym,
-                "name": name,
-                "sector": sec,
-                "model_score": float(sc),
-                "close": close,
-                "pct_chg": pct,
-                "pct_source": pct_source,
-            }
+                {
+                    "symbol": sym,
+                    "name": name,
+                    "sector": sec,
+                    "model_score": float(pd.to_numeric(score.get(sym, sc), errors="coerce")),
+                    "final_score": float(sc),
+                    "close": close,
+                    "pct_chg": pct,
+                    "pct_source": pct_source,
+                }
         )
     return pd.DataFrame(model_rows)
 
@@ -379,6 +531,7 @@ def _compute_model_top_fast(
 
     model_task = str((m.get("meta") or {}).get("task", "")).strip().lower()
     is_minute_model = model_task == "minute_cls"
+    model_risk_penalty_cfg = dict(model_ref_cfg.get("risk_penalty") or {})
     sector_map_file = str(sector_cfg.get("map_file", "./data/sector_map.csv"))
     sector_mapping = load_sector_map(sector_map_file)
 
@@ -572,6 +725,9 @@ def _compute_model_top_fast(
             manual_hist_dir=manual_hist_dir,
             sector_mapping=sector_mapping,
             factors_rule=factors_rule,
+            candidate_n=int(model_risk_penalty_cfg.get("candidate_pool_size", 100) or 100),
+            risk_penalty_cfg=model_risk_penalty_cfg,
+            notes=notes,
         )
         stats["time_model_ms"] = round((time.time() - t_model) * 1000, 2)
         return out
@@ -1410,6 +1566,7 @@ def compute_market(params: dict) -> dict:
     model_cache_dir = str(model_ref_cfg.get("cache_dir", "./cache/model_scores"))
     model_candidate_mode = str(model_ref_cfg.get("candidate_mode", "backtest_like") or "backtest_like").lower()
     model_candidate_max_symbols = int(model_ref_cfg.get("candidate_max_symbols", 0) or 0)
+    model_risk_penalty_cfg = dict(model_ref_cfg.get("risk_penalty") or {})
     regime_filter_enabled = bool(params.get("regime_filter", True))
     index_symbol = str(params.get("index_symbol", "000300"))
     index_ma_window = int(params.get("index_ma_window", 200))
@@ -1819,49 +1976,19 @@ def compute_market(params: dict) -> dict:
             pass
 
     def _build_model_top_from_score(score: pd.Series | None, factors_rule: pd.DataFrame | None) -> pd.DataFrame:
-        if not isinstance(score, pd.Series) or score.empty:
-            return pd.DataFrame()
         sector_map_file = str(sector_cfg.get("map_file", "./data/sector_map.csv"))
         sector_mapping = load_sector_map(sector_map_file)
-        name_map = _load_universe_name_map(universe_file)
-        fr = (
-            factors_rule.set_index("symbol")
-            if factors_rule is not None and not factors_rule.empty and "symbol" in factors_rule.columns
-            else pd.DataFrame()
+        return _build_model_top_rows(
+            score,
+            top_n=top_n,
+            universe_file=universe_file,
+            manual_hist_dir=manual_hist_dir,
+            sector_mapping=sector_mapping,
+            factors_rule=factors_rule,
+            candidate_n=int(model_risk_penalty_cfg.get("candidate_pool_size", 100) or 100),
+            risk_penalty_cfg=model_risk_penalty_cfg,
+            notes=notes,
         )
-        model_rows = []
-        for sym, sc in score.sort_values(ascending=False).head(top_n).items():
-            sym = str(sym).zfill(6)
-            name = name_map.get(sym, "")
-            close = float("nan")
-            pct = float("nan")
-            pct_source = "hist"
-            if not fr.empty and sym in fr.index:
-                rr = fr.loc[sym]
-                if isinstance(rr, pd.DataFrame):
-                    rr = rr.iloc[0]
-                name = str(rr.get("name", name) or name)
-                close = float(pd.to_numeric(rr.get("close", float("nan")), errors="coerce"))
-                pct = float(pd.to_numeric(rr.get("pct_chg", float("nan")), errors="coerce"))
-                pct_source = str(rr.get("pct_source", "spot") or "spot")
-            if not (close == close and close > 0):
-                close, pct_hist = _load_manual_last_quote(manual_hist_dir, sym)
-                if not (pct == pct):
-                    pct = pct_hist
-                pct_source = "hist"
-            sec = sector_mapping.get(sym, "") if sector_mapping else ""
-            model_rows.append(
-                {
-                    "symbol": sym,
-                    "name": name,
-                    "sector": sec,
-                    "model_score": float(sc),
-                    "close": close,
-                    "pct_chg": pct,
-                    "pct_source": pct_source,
-                }
-            )
-        return pd.DataFrame(model_rows)
 
     def _run_rule_pipeline(current_spot_rule: pd.DataFrame, current_preselect_n: int) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame | None, pd.Series | None, list[str]]:
         attempt_notes: list[str] = []

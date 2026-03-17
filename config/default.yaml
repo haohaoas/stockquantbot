@@ -93,6 +93,14 @@ signals:
     cache_enabled: true
     cache_ttl_sec: 7200
     cache_dir: ./cache/model_scores
+    risk_penalty:
+      enabled: true
+      candidate_pool_size: 100
+      penalty_factor: 0.08
+      turnover_ratio_weight: 0.45
+      high_turnover_weight: 0.35
+      volume_ratio_weight: 0.20
+      hard_filter_high_turnover: false
   symbols: []
 score_weights:
   mode: rule
