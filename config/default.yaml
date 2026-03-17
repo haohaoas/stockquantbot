@@ -2,7 +2,7 @@ universe:
   min_price: 4.0
   max_price: 50.0
   min_avg_amount_20: 100000000
-  exclude_st: true
+  exclude_st: false
 universe_file: ./data/universe.csv
 use_universe_file: true
 allow_eastmoney_fallback: false
