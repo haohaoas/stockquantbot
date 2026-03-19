@@ -1386,6 +1386,55 @@ def _load_name_symbol_map() -> dict[str, str]:
     return _NAME_SYMBOL_CACHE
 
 
+def _normalize_watchlist_name(val: str) -> str:
+    return re.sub(r"\s+", "", str(val or "")).strip().lower()
+
+
+def _resolve_watchlist_inputs(values: list[Any]) -> tuple[list[str], list[str]]:
+    resolved: list[str] = []
+    unresolved: list[str] = []
+    name_map = _load_name_symbol_map()
+    normalized_name_map = {
+        _normalize_watchlist_name(name): sym for name, sym in name_map.items() if _normalize_watchlist_name(name)
+    }
+
+    for raw in values or []:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        sym = app_module._normalize_symbol(text)
+        if sym:
+            resolved.append(sym)
+            continue
+
+        norm = _normalize_watchlist_name(text)
+        matched = normalized_name_map.get(norm)
+        if matched:
+            resolved.append(matched)
+            continue
+
+        partial_hits = []
+        for name, name_sym in name_map.items():
+            if norm and norm in _normalize_watchlist_name(name):
+                partial_hits.append(name_sym)
+                if len(partial_hits) > 1:
+                    break
+        if len(partial_hits) == 1:
+            resolved.append(partial_hits[0])
+            continue
+
+        unresolved.append(text)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for sym in resolved:
+        s = str(sym).zfill(6)
+        if s and s not in seen:
+            seen.add(s)
+            deduped.append(s)
+    return deduped, unresolved
+
+
 def _parse_news_time(val: str) -> dt.datetime | None:
     if not val:
         return None
@@ -2696,14 +2745,16 @@ def add_watchlist(payload: dict = Body(...)) -> dict:
     cfg = app_module.load_config("config/default.yaml")
     watchlist_file = str(cfg.get("watchlist_file", "./data/watchlist.csv"))
     symbols = payload.get("symbols") or []
-    new_syms = [app_module._normalize_symbol(s) for s in symbols]
-    new_syms = [s for s in new_syms if s]
+    new_syms, unresolved = _resolve_watchlist_inputs(symbols)
     if not new_syms:
-        return {"added": [], "symbols": app_module.load_watchlist(watchlist_file)}
+        current = app_module.load_watchlist(watchlist_file)
+        return {"added": [], "symbols": current, "unresolved": unresolved, "items": [{"symbol": s, "name": _load_symbol_name_map().get(str(s).zfill(6), "")} for s in current]}
     watchlist = app_module.load_watchlist(watchlist_file)
     merged = watchlist + [s for s in new_syms if s not in set(watchlist)]
     app_module.save_watchlist(watchlist_file, merged)
-    return {"added": new_syms, "symbols": merged}
+    mapping = _load_symbol_name_map()
+    items = [{"symbol": s, "name": mapping.get(str(s).zfill(6), "")} for s in merged]
+    return {"added": new_syms, "symbols": merged, "unresolved": unresolved, "items": items}
 
 
 @app.delete("/api/watchlist")

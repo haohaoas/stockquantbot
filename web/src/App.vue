@@ -215,12 +215,13 @@
             <span class="meta">{{ watchlist.length }} 只</span>
           </div>
           <div v-if="isWatchlist" class="watchlist-add">
-            <input v-model.trim="watchlistInput" placeholder="输入代码，如 000001 / 600000" />
+            <input v-model.trim="watchlistInput" placeholder="输入代码或名称，如 000001 / 平安银行" />
             <button @click="addFromInput">添加</button>
           </div>
+          <div v-if="watchlistMessage" class="muted">{{ watchlistMessage }}</div>
           <div class="chips">
             <span v-for="item in watchlist" :key="item.symbol" class="chip" @click="removeFromWatchlist(item.symbol)">
-              {{ item.symbol }} ×
+              {{ item.symbol }}{{ item.name ? ' ' + item.name : '' }} ×
             </span>
             <span v-if="watchlist.length === 0" class="muted">暂无自选</span>
           </div>
@@ -394,6 +395,7 @@ const serverTime = ref('')
 const tradeDate = ref('')
 const watchlist = ref([])
 const watchlistInput = ref('')
+const watchlistMessage = ref('')
 const newsItems = ref([])
 const newsLoading = ref(false)
 const newsError = ref('')
@@ -711,30 +713,56 @@ async function fetchNewsSummary() {
 
 async function addToWatchlist(symbol) {
   if (!symbol) return
-  await fetch(apiEndpoint('/api/watchlist'), {
+  watchlistMessage.value = ''
+  const res = await fetch(apiEndpoint('/api/watchlist'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ symbols: [symbol] })
   })
-  await fetchWatchlist()
+  const data = await res.json()
+  if (Array.isArray(data?.items)) {
+    watchlist.value = data.items
+  } else {
+    await fetchWatchlist()
+  }
+  if (Array.isArray(data?.added) && data.added.length > 0) {
+    watchlistMessage.value = `已添加 ${data.added.length} 只到自选`
+  }
   contextMenu.value.show = false
 }
 
 async function addFromInput() {
   const raw = watchlistInput.value
   if (!raw) return
+  watchlistMessage.value = ''
   const symbols = raw
     .split(/[,\s]+/g)
     .map((s) => s.trim())
     .filter(Boolean)
   if (symbols.length === 0) return
-  await fetch(apiEndpoint('/api/watchlist'), {
+  const res = await fetch(apiEndpoint('/api/watchlist'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ symbols })
   })
+  const data = await res.json()
   watchlistInput.value = ''
-  await fetchWatchlist()
+  if (Array.isArray(data?.items)) {
+    watchlist.value = data.items
+  } else {
+    await fetchWatchlist()
+  }
+  const addedCount = Array.isArray(data?.added) ? data.added.length : 0
+  const unresolved = Array.isArray(data?.unresolved) ? data.unresolved : []
+  if (addedCount > 0 && unresolved.length > 0) {
+    watchlistMessage.value = `已添加 ${addedCount} 只，未识别：${unresolved.join('、')}`
+  } else if (addedCount > 0) {
+    watchlistMessage.value = `已添加 ${addedCount} 只到自选`
+  } else if (unresolved.length > 0) {
+    watchlistMessage.value = `未识别：${unresolved.join('、')}`
+  } else {
+    watchlistMessage.value = '没有可添加的自选'
+  }
   if (isWatchlist.value) {
     await refreshNow()
   }
@@ -742,12 +770,22 @@ async function addFromInput() {
 
 async function removeFromWatchlist(symbol) {
   if (!symbol) return
-  await fetch(apiEndpoint('/api/watchlist'), {
+  watchlistMessage.value = ''
+  const res = await fetch(apiEndpoint('/api/watchlist'), {
     method: 'DELETE',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ symbols: [symbol] })
   })
-  await fetchWatchlist()
+  const data = await res.json()
+  if (Array.isArray(data?.symbols)) {
+    const nameMap = new Map((watchlist.value || []).map((item) => [String(item.symbol || '').padStart(6, '0'), item.name || '']))
+    watchlist.value = data.symbols.map((s) => {
+      const sym = String(s || '').padStart(6, '0')
+      return { symbol: sym, name: nameMap.get(sym) || '' }
+    })
+  } else {
+    await fetchWatchlist()
+  }
 }
 
 async function refreshNow() {
