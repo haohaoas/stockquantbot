@@ -814,11 +814,14 @@ def _normalize_symbol(sym: str) -> str:
     return ""
 
 
-def _apply_profile_filters(factors: pd.DataFrame, decision_cfg: dict, notes: list[str]) -> pd.DataFrame:
+def _apply_profile_filters(factors: pd.DataFrame, decision_cfg: dict, notes: list[str], is_watchlist: bool = False) -> pd.DataFrame:
     cfg = (decision_cfg or {}).get("profile_filter") or {}
     if not bool(cfg.get("enabled", False)):
         return factors
     if factors is None or factors.empty:
+        return factors
+    if is_watchlist:
+        notes.append("自选模式跳过轮廓过滤。")
         return factors
 
     out = factors.copy()
@@ -2195,7 +2198,7 @@ def compute_market(params: dict) -> dict:
             ranked_full = pd.DataFrame()
         else:
             current_factors_rule = _sanitize_factor_frame(current_factors_rule, attempt_notes, stage="评分前清洗")
-            factors_for_rule = _apply_profile_filters(current_factors_rule, decision_cfg, attempt_notes)
+            factors_for_rule = _apply_profile_filters(current_factors_rule, decision_cfg, attempt_notes, is_watchlist=is_watchlist)
             if sector_cfg.get("enabled"):
                 map_file = str(sector_cfg.get("map_file", "./data/sector_map.csv"))
                 factors_for_rule = apply_sector_map(factors_for_rule, map_file)
