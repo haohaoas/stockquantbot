@@ -972,7 +972,6 @@ function clearModelWarmupRetry() {
 }
 
 function shouldRetryModelWarmup(data) {
-  if (!modelIndependent.value) return false
   const items = Array.isArray(data?.model_top) ? data.model_top : []
   if (items.length > 0) return false
   const hintNotes = Array.isArray(data?.notes) ? data.notes : []
@@ -986,7 +985,7 @@ function scheduleModelWarmupRetry(data) {
   clearModelWarmupRetry()
   if (!shouldRetryModelWarmup(data)) return
   modelWarmupRetryTimer = setTimeout(() => {
-    if (viewPage.value !== 'market' || modelLoading.value || loading.value || !modelIndependent.value) return
+    if (viewPage.value !== 'market' || modelLoading.value || loading.value) return
     refreshModelTop()
   }, 3000)
 }
