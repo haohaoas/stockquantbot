@@ -319,6 +319,10 @@ deepseek:
 news:
   summary_cache_sec: 300
   hot_sector_aliases:
+    房地产:
+    - 全国地产
+    - 区域地产
+    - 房产服务
     科技:
     - 半导体
     - 芯片
