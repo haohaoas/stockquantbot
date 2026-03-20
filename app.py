@@ -372,10 +372,8 @@ def _fundflow_tag_from_row(
     row: pd.Series | dict,
     *,
     wash_pct_floor: float = -1.0,
-    wash_volume_ratio_max: float = 1.0,
     wash_price_vs_high_max: float = 0.92,
     distribute_pct_cap: float = 1.0,
-    distribute_volume_ratio_min: float = 1.5,
     distribute_price_vs_high_min: float = 0.97,
 ) -> tuple[str, str]:
     if hist is None or hist.empty or "main_net_inflow" not in hist.columns:
@@ -386,15 +384,12 @@ def _fundflow_tag_from_row(
     if not (main_net == main_net):
         return "", ""
     pct_chg = float(pd.to_numeric(row_data.get("pct_chg", float("nan")), errors="coerce"))
-    vol_ratio = float(pd.to_numeric(row_data.get("volume_ratio_5", float("nan")), errors="coerce"))
     price_vs_high = float(pd.to_numeric(row_data.get("price_vs_high_20", float("nan")), errors="coerce"))
 
     wash_ok = (
         main_net < 0
         and pct_chg == pct_chg
         and pct_chg > wash_pct_floor
-        and vol_ratio == vol_ratio
-        and vol_ratio < wash_volume_ratio_max
         and price_vs_high == price_vs_high
         and price_vs_high < wash_price_vs_high_max
     )
@@ -405,8 +400,6 @@ def _fundflow_tag_from_row(
         main_net > 0
         and pct_chg == pct_chg
         and pct_chg < distribute_pct_cap
-        and vol_ratio == vol_ratio
-        and vol_ratio > distribute_volume_ratio_min
         and price_vs_high == price_vs_high
         and price_vs_high > distribute_price_vs_high_min
     )
@@ -420,10 +413,8 @@ def _attach_fundflow_tags(
     *,
     fundflow_dir: str,
     wash_pct_floor: float = -1.0,
-    wash_volume_ratio_max: float = 1.0,
     wash_price_vs_high_max: float = 0.92,
     distribute_pct_cap: float = 1.0,
-    distribute_volume_ratio_min: float = 1.5,
     distribute_price_vs_high_min: float = 0.97,
 ) -> pd.DataFrame:
     if df is None or df.empty or "symbol" not in df.columns:
@@ -440,10 +431,8 @@ def _attach_fundflow_tags(
             hist,
             rr,
             wash_pct_floor=wash_pct_floor,
-            wash_volume_ratio_max=wash_volume_ratio_max,
             wash_price_vs_high_max=wash_price_vs_high_max,
             distribute_pct_cap=distribute_pct_cap,
-            distribute_volume_ratio_min=distribute_volume_ratio_min,
             distribute_price_vs_high_min=distribute_price_vs_high_min,
         )
         tags.append(tag)
@@ -673,10 +662,8 @@ def _build_model_top_rows(
         out,
         fundflow_dir=fundflow_dir,
         wash_pct_floor=float(ff_cfg.get("wash_pct_floor", -1.0) or -1.0),
-        wash_volume_ratio_max=float(ff_cfg.get("wash_volume_ratio_max", 1.0) or 1.0),
         wash_price_vs_high_max=float(ff_cfg.get("wash_price_vs_high_max", 0.92) or 0.92),
         distribute_pct_cap=float(ff_cfg.get("distribute_pct_cap", 1.0) or 1.0),
-        distribute_volume_ratio_min=float(ff_cfg.get("distribute_volume_ratio_min", 1.5) or 1.5),
         distribute_price_vs_high_min=float(ff_cfg.get("distribute_price_vs_high_min", 0.97) or 0.97),
     )
 
@@ -2542,10 +2529,8 @@ def compute_market(params: dict) -> dict:
             ranked,
             fundflow_dir=fundflow_dir,
             wash_pct_floor=float(fundflow_cfg.get("wash_pct_floor", -1.0) or -1.0),
-            wash_volume_ratio_max=float(fundflow_cfg.get("wash_volume_ratio_max", 1.0) or 1.0),
             wash_price_vs_high_max=float(fundflow_cfg.get("wash_price_vs_high_max", 0.92) or 0.92),
             distribute_pct_cap=float(fundflow_cfg.get("distribute_pct_cap", 1.0) or 1.0),
-            distribute_volume_ratio_min=float(fundflow_cfg.get("distribute_volume_ratio_min", 1.5) or 1.5),
             distribute_price_vs_high_min=float(fundflow_cfg.get("distribute_price_vs_high_min", 0.97) or 0.97),
         )
         if isinstance(chosen_score, pd.Series) and not chosen_score.empty:
