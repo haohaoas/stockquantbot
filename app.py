@@ -299,16 +299,41 @@ def _load_manual_hist_tail(manual_hist_dir: str, symbol: str, tail_rows: int = 8
         return pd.DataFrame()
     if df.empty:
         return pd.DataFrame()
-    keep = [c for c in ["date", "open", "close", "volume", "turnover_rate"] if c in df.columns]
+    keep = [c for c in ["date", "open", "close", "high", "volume", "turnover_rate"] if c in df.columns]
     if not keep:
         return pd.DataFrame()
     out = df[keep].copy()
-    for c in ("open", "close", "volume", "turnover_rate"):
+    for c in ("open", "close", "high", "volume", "turnover_rate"):
         if c in out.columns:
             out[c] = pd.to_numeric(out[c], errors="coerce")
     if tail_rows > 0 and len(out) > tail_rows:
         out = out.tail(tail_rows).copy()
     return out.reset_index(drop=True)
+
+
+def _derive_model_top_aux_features(hist: pd.DataFrame) -> tuple[float, float]:
+    if hist is None or hist.empty:
+        return float("nan"), float("nan")
+    volume_ratio_5 = float("nan")
+    price_vs_high_20 = float("nan")
+    try:
+        if "volume" in hist.columns:
+            vol = pd.to_numeric(hist["volume"], errors="coerce")
+            vr5 = vol / vol.rolling(5, min_periods=5).mean().shift(1)
+            latest_vr5 = pd.to_numeric(vr5.iloc[-1], errors="coerce")
+            if pd.notna(latest_vr5):
+                volume_ratio_5 = float(latest_vr5)
+        if "close" in hist.columns and "high" in hist.columns:
+            close = pd.to_numeric(hist["close"], errors="coerce")
+            high = pd.to_numeric(hist["high"], errors="coerce")
+            high20 = high.rolling(20, min_periods=20).max().shift(1)
+            latest_close = pd.to_numeric(close.iloc[-1], errors="coerce")
+            latest_high20 = pd.to_numeric(high20.iloc[-1], errors="coerce")
+            if pd.notna(latest_close) and pd.notna(latest_high20) and float(latest_high20) > 0:
+                price_vs_high_20 = float(latest_close / latest_high20)
+    except Exception:
+        return volume_ratio_5, price_vs_high_20
+    return volume_ratio_5, price_vs_high_20
 
 
 def _load_fundflow_tail(fundflow_dir: str, symbol: str, tail_rows: int = 5) -> pd.DataFrame:
@@ -601,6 +626,7 @@ def _build_model_top_rows(
         close = float("nan")
         pct = float("nan")
         pct_source = "hist"
+        hist_tail = pd.DataFrame()
         if not fr.empty and sym in fr.index:
             rr = fr.loc[sym]
             if isinstance(rr, pd.DataFrame):
@@ -614,6 +640,13 @@ def _build_model_top_rows(
         else:
             volume_ratio_5 = float("nan")
             price_vs_high_20 = float("nan")
+        if not ((volume_ratio_5 == volume_ratio_5) and (price_vs_high_20 == price_vs_high_20)):
+            hist_tail = _load_manual_hist_tail(manual_hist_dir, sym, tail_rows=90)
+            hist_vr5, hist_pvh20 = _derive_model_top_aux_features(hist_tail)
+            if not (volume_ratio_5 == volume_ratio_5) and pd.notna(hist_vr5):
+                volume_ratio_5 = float(hist_vr5)
+            if not (price_vs_high_20 == price_vs_high_20) and pd.notna(hist_pvh20):
+                price_vs_high_20 = float(hist_pvh20)
         if not (close == close and close > 0):
             close, pct_hist = _load_manual_last_quote(manual_hist_dir, sym)
             if not (pct == pct):
