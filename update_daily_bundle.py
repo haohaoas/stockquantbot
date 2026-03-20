@@ -1,15 +1,14 @@
-from __future__ import annotations
-
 import argparse
 import subprocess
 import sys
 from pathlib import Path
+from typing import List
 
 from backtest_optimize import load_config
 from update_manual_hist import _clear_post_update_disk_caches, _post_refresh_prewarm, _write_refresh_signal
 
 
-def _run(cmd: list[str]) -> None:
+def _run(cmd: List[str]) -> None:
     print("[run]", " ".join(cmd))
     subprocess.run(cmd, check=True, cwd=str(Path(__file__).resolve().parent))
 
