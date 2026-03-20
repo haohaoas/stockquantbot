@@ -122,8 +122,6 @@
                   <td class="col-name">
                     <div class="name-line">
                       <span class="name-text">{{ row.name }}</span>
-                    </div>
-                    <div v-if="row.fundflow_tag" class="name-tag-row">
                       <span v-if="row.fundflow_tag" :class="['mini-badge', 'inline', row.fundflow_tag_type === 'in' ? 'fund-in' : 'fund-out']">
                         {{ row.fundflow_tag }}
                       </span>
@@ -256,9 +254,9 @@
                   <span>{{ row.name }}</span>
                 </div>
                 <div class="sub">
-                  <span>模型 {{ fmtPct(row.model_score) }}</span>
-                  <span v-if="row.sector">{{ row.sector }}</span>
-                  <span :class="row.pct_chg >= 0 ? 'up' : 'down'">{{ fmt(row.pct_chg) }}%</span>
+                  <span class="sub-score">模型 {{ fmtPct(row.model_score) }}</span>
+                  <span v-if="row.sector" class="sub-sector">{{ row.sector }}</span>
+                  <span :class="['sub-pct', row.pct_chg >= 0 ? 'up' : 'down']">{{ fmt(row.pct_chg) }}%</span>
                 </div>
               </div>
               <span v-if="row.fundflow_tag" :class="['mini-badge', 'model-fundflow', row.fundflow_tag_type === 'in' ? 'fund-in' : 'fund-out']">
@@ -1762,18 +1760,18 @@ onUnmounted(() => {
 
 .name-line {
   display: flex;
-  align-items: flex-start;
-  gap: 4px;
+  align-items: center;
+  gap: 6px;
   min-width: 0;
-}
-
-.name-text {
-  display: block;
   white-space: nowrap;
 }
 
-.name-tag-row {
-  margin-top: 4px;
+.name-text {
+  display: inline-block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .mini-badge {
@@ -1867,10 +1865,24 @@ onUnmounted(() => {
 
 .side .sub {
   display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 10px;
+  min-width: 0;
   color: #6b7280;
   font-size: 12px;
+}
+
+.side .sub-score,
+.side .sub-pct {
+  flex-shrink: 0;
+}
+
+.side .sub-sector {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .side .model-fundflow {
