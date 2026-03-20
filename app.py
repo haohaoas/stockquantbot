@@ -355,13 +355,14 @@ def _fundflow_tag_from_row(
 ) -> tuple[str, str]:
     if hist is None or hist.empty or "main_net_inflow" not in hist.columns:
         return "", ""
+    row_data = row if row is not None else {}
     latest = hist.tail(1).iloc[0]
     main_net = float(pd.to_numeric(latest.get("main_net_inflow", float("nan")), errors="coerce"))
     if not (main_net == main_net):
         return "", ""
-    pct_chg = float(pd.to_numeric((row or {}).get("pct_chg", float("nan")), errors="coerce"))
-    vol_ratio = float(pd.to_numeric((row or {}).get("volume_ratio_5", float("nan")), errors="coerce"))
-    price_vs_high = float(pd.to_numeric((row or {}).get("price_vs_high_20", float("nan")), errors="coerce"))
+    pct_chg = float(pd.to_numeric(row_data.get("pct_chg", float("nan")), errors="coerce"))
+    vol_ratio = float(pd.to_numeric(row_data.get("volume_ratio_5", float("nan")), errors="coerce"))
+    price_vs_high = float(pd.to_numeric(row_data.get("price_vs_high_20", float("nan")), errors="coerce"))
 
     wash_ok = (
         main_net < 0
