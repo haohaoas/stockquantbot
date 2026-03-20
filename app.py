@@ -342,36 +342,97 @@ def _load_fundflow_tail(fundflow_dir: str, symbol: str, tail_rows: int = 5) -> p
     return cached.copy().reset_index(drop=True)
 
 
-def _fundflow_tag_from_hist(hist: pd.DataFrame, streak_days: int = 3) -> tuple[str, str, int]:
+def _fundflow_tag_from_row(
+    hist: pd.DataFrame,
+    row: pd.Series | dict,
+    *,
+    wash_pct_floor: float = -1.0,
+    wash_volume_ratio_max: float = 1.0,
+    wash_price_vs_high_max: float = 0.92,
+    distribute_pct_cap: float = 1.0,
+    distribute_volume_ratio_min: float = 1.5,
+    distribute_price_vs_high_min: float = 0.97,
+) -> tuple[str, str]:
     if hist is None or hist.empty or "main_net_inflow" not in hist.columns:
-        return "", "", 0
-    series = pd.to_numeric(hist["main_net_inflow"], errors="coerce").dropna()
-    if len(series) < streak_days:
-        return "", "", 0
-    tail = series.tail(streak_days)
-    if (tail > 0).all():
-        return f"主力{streak_days}连流入", "in", int(streak_days)
-    if (tail < 0).all():
-        return f"主力{streak_days}连流出", "out", -int(streak_days)
-    return "", "", 0
+        return "", ""
+    latest = hist.tail(1).iloc[0]
+    main_net = float(pd.to_numeric(latest.get("main_net_inflow", float("nan")), errors="coerce"))
+    if not (main_net == main_net):
+        return "", ""
+    pct_chg = float(pd.to_numeric((row or {}).get("pct_chg", float("nan")), errors="coerce"))
+    vol_ratio = float(pd.to_numeric((row or {}).get("volume_ratio_5", float("nan")), errors="coerce"))
+    price_vs_high = float(pd.to_numeric((row or {}).get("price_vs_high_20", float("nan")), errors="coerce"))
+
+    wash_ok = (
+        main_net < 0
+        and pct_chg == pct_chg
+        and pct_chg > wash_pct_floor
+        and vol_ratio == vol_ratio
+        and vol_ratio < wash_volume_ratio_max
+        and price_vs_high == price_vs_high
+        and price_vs_high < wash_price_vs_high_max
+    )
+    if wash_ok:
+        return "洗盘嫌疑", "in"
+
+    distribute_ok = (
+        main_net > 0
+        and pct_chg == pct_chg
+        and pct_chg < distribute_pct_cap
+        and vol_ratio == vol_ratio
+        and vol_ratio > distribute_volume_ratio_min
+        and price_vs_high == price_vs_high
+        and price_vs_high > distribute_price_vs_high_min
+    )
+    if distribute_ok:
+        return "出货嫌疑", "out"
+    return "", ""
 
 
-def _attach_fundflow_tags(df: pd.DataFrame, *, fundflow_dir: str, streak_days: int = 3) -> pd.DataFrame:
+def _attach_fundflow_tags(
+    df: pd.DataFrame,
+    *,
+    fundflow_dir: str,
+    wash_pct_floor: float = -1.0,
+    wash_volume_ratio_max: float = 1.0,
+    wash_price_vs_high_max: float = 0.92,
+    distribute_pct_cap: float = 1.0,
+    distribute_volume_ratio_min: float = 1.5,
+    distribute_price_vs_high_min: float = 0.97,
+) -> pd.DataFrame:
     if df is None or df.empty or "symbol" not in df.columns:
         return df
     out = df.copy()
     tags: list[str] = []
     tag_types: list[str] = []
-    streaks: list[int] = []
-    for sym in out["symbol"].astype(str).str.zfill(6):
-        hist = _load_fundflow_tail(fundflow_dir, sym, tail_rows=max(streak_days, 5))
-        tag, tag_type, streak = _fundflow_tag_from_hist(hist, streak_days=streak_days)
+    latest_main_net: list[float] = []
+    latest_large_main_net: list[float] = []
+    for _, rr in out.iterrows():
+        sym = str(rr.get("symbol", "")).zfill(6)
+        hist = _load_fundflow_tail(fundflow_dir, sym, tail_rows=5)
+        tag, tag_type = _fundflow_tag_from_row(
+            hist,
+            rr,
+            wash_pct_floor=wash_pct_floor,
+            wash_volume_ratio_max=wash_volume_ratio_max,
+            wash_price_vs_high_max=wash_price_vs_high_max,
+            distribute_pct_cap=distribute_pct_cap,
+            distribute_volume_ratio_min=distribute_volume_ratio_min,
+            distribute_price_vs_high_min=distribute_price_vs_high_min,
+        )
         tags.append(tag)
         tag_types.append(tag_type)
-        streaks.append(streak)
+        if hist is not None and not hist.empty:
+            latest = hist.tail(1).iloc[0]
+            latest_main_net.append(float(pd.to_numeric(latest.get("main_net_inflow", float("nan")), errors="coerce")))
+            latest_large_main_net.append(float(pd.to_numeric(latest.get("large_main_net_inflow", float("nan")), errors="coerce")))
+        else:
+            latest_main_net.append(float("nan"))
+            latest_large_main_net.append(float("nan"))
     out["fundflow_tag"] = tags
     out["fundflow_tag_type"] = tag_types
-    out["main_net_inflow_streak"] = streaks
+    out["main_net_inflow"] = latest_main_net
+    out["large_main_net_inflow"] = latest_large_main_net
     return out
 
 
@@ -506,7 +567,7 @@ def _build_model_top_rows(
     universe_file: str,
     manual_hist_dir: str,
     fundflow_dir: str = "./data/biying_fundflow",
-    fundflow_streak_days: int = 3,
+    fundflow_cfg: dict | None = None,
     sector_mapping: dict[str, str] | None = None,
     factors_rule: pd.DataFrame | None = None,
     candidate_n: int | None = None,
@@ -547,6 +608,11 @@ def _build_model_top_rows(
             close = float(pd.to_numeric(rr.get("close", float("nan")), errors="coerce"))
             pct = float(pd.to_numeric(rr.get("pct_chg", float("nan")), errors="coerce"))
             pct_source = str(rr.get("pct_source", "spot") or "spot")
+            volume_ratio_5 = float(pd.to_numeric(rr.get("volume_ratio_5", float("nan")), errors="coerce"))
+            price_vs_high_20 = float(pd.to_numeric(rr.get("price_vs_high_20", float("nan")), errors="coerce"))
+        else:
+            volume_ratio_5 = float("nan")
+            price_vs_high_20 = float("nan")
         if not (close == close and close > 0):
             close, pct_hist = _load_manual_last_quote(manual_hist_dir, sym)
             if not (pct == pct):
@@ -563,10 +629,22 @@ def _build_model_top_rows(
                     "close": close,
                     "pct_chg": pct,
                     "pct_source": pct_source,
+                    "volume_ratio_5": volume_ratio_5,
+                    "price_vs_high_20": price_vs_high_20,
                 }
         )
     out = pd.DataFrame(model_rows)
-    return _attach_fundflow_tags(out, fundflow_dir=fundflow_dir, streak_days=int(fundflow_streak_days or 3))
+    ff_cfg = dict(fundflow_cfg or {})
+    return _attach_fundflow_tags(
+        out,
+        fundflow_dir=fundflow_dir,
+        wash_pct_floor=float(ff_cfg.get("wash_pct_floor", -1.0) or -1.0),
+        wash_volume_ratio_max=float(ff_cfg.get("wash_volume_ratio_max", 1.0) or 1.0),
+        wash_price_vs_high_max=float(ff_cfg.get("wash_price_vs_high_max", 0.92) or 0.92),
+        distribute_pct_cap=float(ff_cfg.get("distribute_pct_cap", 1.0) or 1.0),
+        distribute_volume_ratio_min=float(ff_cfg.get("distribute_volume_ratio_min", 1.5) or 1.5),
+        distribute_price_vs_high_min=float(ff_cfg.get("distribute_price_vs_high_min", 0.97) or 0.97),
+    )
 
 
 def _compute_model_top_fast(
@@ -587,7 +665,7 @@ def _compute_model_top_fast(
     news_cfg: dict,
     sector_cfg: dict,
     fundflow_dir: str,
-    fundflow_streak_days: int,
+    fundflow_cfg: dict,
     is_watchlist: bool,
     model_independent: bool,
     preselect_cached_symbols: list[str] | None = None,
@@ -795,7 +873,7 @@ def _compute_model_top_fast(
             universe_file=universe_file,
             manual_hist_dir=manual_hist_dir,
             fundflow_dir=fundflow_dir,
-            fundflow_streak_days=fundflow_streak_days,
+            fundflow_cfg=fundflow_cfg,
             sector_mapping=sector_mapping,
             factors_rule=factors_rule,
             candidate_n=int(model_risk_penalty_cfg.get("candidate_pool_size", 100) or 100),
@@ -1645,7 +1723,6 @@ def compute_market(params: dict) -> dict:
     model_risk_penalty_cfg = dict(model_ref_cfg.get("risk_penalty") or {})
     fundflow_cfg = signals_cfg.get("fundflow") or {}
     fundflow_dir = str(fundflow_cfg.get("dir", "./data/biying_fundflow") or "./data/biying_fundflow")
-    fundflow_streak_days = max(2, int(fundflow_cfg.get("streak_days", 3) or 3))
     regime_filter_enabled = bool(params.get("regime_filter", True))
     index_symbol = str(params.get("index_symbol", "000300"))
     index_ma_window = int(params.get("index_ma_window", 200))
@@ -1839,7 +1916,7 @@ def compute_market(params: dict) -> dict:
                 news_cfg=news_cfg,
                 sector_cfg=sector_cfg,
                 fundflow_dir=fundflow_dir,
-                fundflow_streak_days=fundflow_streak_days,
+                fundflow_cfg=fundflow_cfg,
                 is_watchlist=is_watchlist,
                 model_independent=model_independent,
                 preselect_cached_symbols=fast_preselect_symbols,
@@ -2065,7 +2142,7 @@ def compute_market(params: dict) -> dict:
             universe_file=universe_file,
             manual_hist_dir=manual_hist_dir,
             fundflow_dir=fundflow_dir,
-            fundflow_streak_days=fundflow_streak_days,
+            fundflow_cfg=fundflow_cfg,
             sector_mapping=sector_mapping,
             factors_rule=factors_rule,
             candidate_n=int(model_risk_penalty_cfg.get("candidate_pool_size", 100) or 100),
@@ -2427,7 +2504,16 @@ def compute_market(params: dict) -> dict:
         stats["after_preselect"] = int(len(chosen_spot_rule))
         stats["after_preselect_target"] = int(chosen_preselect_n)
         notes.extend(chosen_notes)
-        ranked = _attach_fundflow_tags(ranked, fundflow_dir=fundflow_dir, streak_days=fundflow_streak_days)
+        ranked = _attach_fundflow_tags(
+            ranked,
+            fundflow_dir=fundflow_dir,
+            wash_pct_floor=float(fundflow_cfg.get("wash_pct_floor", -1.0) or -1.0),
+            wash_volume_ratio_max=float(fundflow_cfg.get("wash_volume_ratio_max", 1.0) or 1.0),
+            wash_price_vs_high_max=float(fundflow_cfg.get("wash_price_vs_high_max", 0.92) or 0.92),
+            distribute_pct_cap=float(fundflow_cfg.get("distribute_pct_cap", 1.0) or 1.0),
+            distribute_volume_ratio_min=float(fundflow_cfg.get("distribute_volume_ratio_min", 1.5) or 1.5),
+            distribute_price_vs_high_min=float(fundflow_cfg.get("distribute_price_vs_high_min", 0.97) or 0.97),
+        )
         if isinstance(chosen_score, pd.Series) and not chosen_score.empty:
             model_top = _build_model_top_from_score(chosen_score, chosen_factors_rule)
     except Exception as e:

@@ -103,7 +103,12 @@ signals:
       hard_filter_high_turnover: false
   fundflow:
     dir: ./data/biying_fundflow
-    streak_days: 3
+    wash_pct_floor: -1.0
+    wash_volume_ratio_max: 1.0
+    wash_price_vs_high_max: 0.92
+    distribute_pct_cap: 1.0
+    distribute_volume_ratio_min: 1.5
+    distribute_price_vs_high_min: 0.97
   symbols: []
 score_weights:
   mode: rule
