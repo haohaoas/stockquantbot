@@ -119,7 +119,14 @@
                   @contextmenu.prevent="openContextMenu($event, row.symbol)"
                 >
                   <td class="mono col-symbol">{{ row.symbol }}</td>
-                  <td class="col-name">{{ row.name }}</td>
+                  <td class="col-name">
+                    <div>{{ row.name }}</div>
+                    <div v-if="row.fundflow_tag" class="mini-tags">
+                      <span :class="['mini-badge', row.fundflow_tag_type === 'in' ? 'fund-in' : 'fund-out']">
+                        {{ row.fundflow_tag }}
+                      </span>
+                    </div>
+                  </td>
                   <td class="col-action"><span :class="['badge', row.action?.toLowerCase()]">{{ row.action }}</span></td>
                   <td class="col-sector">{{ row.sector || '--' }}</td>
                   <td class="col-score">{{ fmt(comboScore(row)) }}</td>
@@ -250,6 +257,9 @@
                   <span>模型 {{ fmtPct(row.model_score) }}</span>
                   <span v-if="row.sector">{{ row.sector }}</span>
                   <span :class="row.pct_chg >= 0 ? 'up' : 'down'">{{ fmt(row.pct_chg) }}%</span>
+                  <span v-if="row.fundflow_tag" :class="['mini-badge', row.fundflow_tag_type === 'in' ? 'fund-in' : 'fund-out']">
+                    {{ row.fundflow_tag }}
+                  </span>
                 </div>
               </div>
               <button v-if="!isWatchlist" class="ghost" @click="addToWatchlist(row.symbol)">+自选</button>
@@ -1747,6 +1757,31 @@ onUnmounted(() => {
 .badge.watch { background: #fef3c7; color: #92400e; }
 .badge.avoid { background: #fde2e2; color: #b91c1c; }
 .badge.hot { background: #ffe4d6; color: #9a3412; }
+
+.mini-tags {
+  margin-top: 4px;
+}
+
+.mini-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.mini-badge.fund-in {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.mini-badge.fund-out {
+  background: #fee2e2;
+  color: #991b1b;
+}
 
 .up { color: #b91c1c; }
 .down { color: #1d4ed8; }

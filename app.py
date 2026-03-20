@@ -180,6 +180,7 @@ _HOT_SECTOR_CACHE: dict[str, object] = {"ts": 0.0, "sectors": []}
 _MODEL_SCORE_CACHE: dict[str, object] = {"key": "", "ts": 0.0, "scores": None}
 _UNIVERSE_NAME_CACHE: dict[str, dict[str, str]] = {}
 _MANUAL_UNIVERSE_CACHE: dict[str, list[str]] = {}
+_FUND_FLOW_CACHE: dict[str, pd.DataFrame] = {}
 
 
 def clear_runtime_caches() -> None:
@@ -188,6 +189,7 @@ def clear_runtime_caches() -> None:
     _MODEL_SCORE_CACHE["scores"] = None
     _UNIVERSE_NAME_CACHE.clear()
     _MANUAL_UNIVERSE_CACHE.clear()
+    _FUND_FLOW_CACHE.clear()
     _HOT_SECTOR_CACHE["ts"] = 0.0
     _HOT_SECTOR_CACHE["sectors"] = []
 
@@ -307,6 +309,70 @@ def _load_manual_hist_tail(manual_hist_dir: str, symbol: str, tail_rows: int = 8
     if tail_rows > 0 and len(out) > tail_rows:
         out = out.tail(tail_rows).copy()
     return out.reset_index(drop=True)
+
+
+def _load_fundflow_tail(fundflow_dir: str, symbol: str, tail_rows: int = 5) -> pd.DataFrame:
+    p = Path(fundflow_dir) / f"{str(symbol).zfill(6)}.csv"
+    cache_key = str(p.resolve())
+    cached = _FUND_FLOW_CACHE.get(cache_key)
+    if cached is None:
+        if not p.exists():
+            return pd.DataFrame()
+        try:
+            df = pd.read_csv(p)
+        except Exception:
+            return pd.DataFrame()
+        if df.empty:
+            return pd.DataFrame()
+        keep = [c for c in ["date", "main_buy_amt", "main_sell_amt", "main_net_inflow", "large_main_net_inflow"] if c in df.columns]
+        if "date" not in keep:
+            return pd.DataFrame()
+        out = df[keep].copy()
+        out["date"] = out["date"].astype(str).str.slice(0, 10)
+        for c in ("main_buy_amt", "main_sell_amt", "main_net_inflow", "large_main_net_inflow"):
+            if c in out.columns:
+                out[c] = pd.to_numeric(out[c], errors="coerce")
+        out = out.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
+        _FUND_FLOW_CACHE[cache_key] = out
+        cached = out
+    if cached is None or cached.empty:
+        return pd.DataFrame()
+    if tail_rows > 0 and len(cached) > tail_rows:
+        return cached.tail(tail_rows).copy().reset_index(drop=True)
+    return cached.copy().reset_index(drop=True)
+
+
+def _fundflow_tag_from_hist(hist: pd.DataFrame, streak_days: int = 3) -> tuple[str, str, int]:
+    if hist is None or hist.empty or "main_net_inflow" not in hist.columns:
+        return "", "", 0
+    series = pd.to_numeric(hist["main_net_inflow"], errors="coerce").dropna()
+    if len(series) < streak_days:
+        return "", "", 0
+    tail = series.tail(streak_days)
+    if (tail > 0).all():
+        return f"主力{streak_days}连流入", "in", int(streak_days)
+    if (tail < 0).all():
+        return f"主力{streak_days}连流出", "out", -int(streak_days)
+    return "", "", 0
+
+
+def _attach_fundflow_tags(df: pd.DataFrame, *, fundflow_dir: str, streak_days: int = 3) -> pd.DataFrame:
+    if df is None or df.empty or "symbol" not in df.columns:
+        return df
+    out = df.copy()
+    tags: list[str] = []
+    tag_types: list[str] = []
+    streaks: list[int] = []
+    for sym in out["symbol"].astype(str).str.zfill(6):
+        hist = _load_fundflow_tail(fundflow_dir, sym, tail_rows=max(streak_days, 5))
+        tag, tag_type, streak = _fundflow_tag_from_hist(hist, streak_days=streak_days)
+        tags.append(tag)
+        tag_types.append(tag_type)
+        streaks.append(streak)
+    out["fundflow_tag"] = tags
+    out["fundflow_tag_type"] = tag_types
+    out["main_net_inflow_streak"] = streaks
+    return out
 
 
 def _compute_model_risk_features(
@@ -439,6 +505,8 @@ def _build_model_top_rows(
     top_n: int,
     universe_file: str,
     manual_hist_dir: str,
+    fundflow_dir: str = "./data/biying_fundflow",
+    fundflow_streak_days: int = 3,
     sector_mapping: dict[str, str] | None = None,
     factors_rule: pd.DataFrame | None = None,
     candidate_n: int | None = None,
@@ -497,7 +565,8 @@ def _build_model_top_rows(
                     "pct_source": pct_source,
                 }
         )
-    return pd.DataFrame(model_rows)
+    out = pd.DataFrame(model_rows)
+    return _attach_fundflow_tags(out, fundflow_dir=fundflow_dir, streak_days=int(fundflow_streak_days or 3))
 
 
 def _compute_model_top_fast(
@@ -723,6 +792,8 @@ def _compute_model_top_fast(
             top_n=int(params.get("top_n", 20)),
             universe_file=universe_file,
             manual_hist_dir=manual_hist_dir,
+            fundflow_dir=fundflow_dir,
+            fundflow_streak_days=fundflow_streak_days,
             sector_mapping=sector_mapping,
             factors_rule=factors_rule,
             candidate_n=int(model_risk_penalty_cfg.get("candidate_pool_size", 100) or 100),
@@ -1570,6 +1641,9 @@ def compute_market(params: dict) -> dict:
     model_candidate_mode = str(model_ref_cfg.get("candidate_mode", "backtest_like") or "backtest_like").lower()
     model_candidate_max_symbols = int(model_ref_cfg.get("candidate_max_symbols", 0) or 0)
     model_risk_penalty_cfg = dict(model_ref_cfg.get("risk_penalty") or {})
+    fundflow_cfg = signals_cfg.get("fundflow") or {}
+    fundflow_dir = str(fundflow_cfg.get("dir", "./data/biying_fundflow") or "./data/biying_fundflow")
+    fundflow_streak_days = max(2, int(fundflow_cfg.get("streak_days", 3) or 3))
     regime_filter_enabled = bool(params.get("regime_filter", True))
     index_symbol = str(params.get("index_symbol", "000300"))
     index_ma_window = int(params.get("index_ma_window", 200))
@@ -1986,6 +2060,8 @@ def compute_market(params: dict) -> dict:
             top_n=top_n,
             universe_file=universe_file,
             manual_hist_dir=manual_hist_dir,
+            fundflow_dir=fundflow_dir,
+            fundflow_streak_days=fundflow_streak_days,
             sector_mapping=sector_mapping,
             factors_rule=factors_rule,
             candidate_n=int(model_risk_penalty_cfg.get("candidate_pool_size", 100) or 100),
@@ -2347,6 +2423,7 @@ def compute_market(params: dict) -> dict:
         stats["after_preselect"] = int(len(chosen_spot_rule))
         stats["after_preselect_target"] = int(chosen_preselect_n)
         notes.extend(chosen_notes)
+        ranked = _attach_fundflow_tags(ranked, fundflow_dir=fundflow_dir, streak_days=fundflow_streak_days)
         if isinstance(chosen_score, pd.Series) and not chosen_score.empty:
             model_top = _build_model_top_from_score(chosen_score, chosen_factors_rule)
     except Exception as e:

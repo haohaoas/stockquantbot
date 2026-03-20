@@ -101,6 +101,9 @@ signals:
       high_turnover_weight: 0.35
       volume_ratio_weight: 0.20
       hard_filter_high_turnover: false
+  fundflow:
+    dir: ./data/biying_fundflow
+    streak_days: 3
   symbols: []
 score_weights:
   mode: rule
