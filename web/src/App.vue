@@ -120,9 +120,9 @@
                 >
                   <td class="mono col-symbol">{{ row.symbol }}</td>
                   <td class="col-name">
-                    <div>{{ row.name }}</div>
-                    <div v-if="row.fundflow_tag" class="mini-tags">
-                      <span :class="['mini-badge', row.fundflow_tag_type === 'in' ? 'fund-in' : 'fund-out']">
+                    <div class="name-line">
+                      <span>{{ row.name }}</span>
+                      <span v-if="row.fundflow_tag" :class="['mini-badge', 'inline', row.fundflow_tag_type === 'in' ? 'fund-in' : 'fund-out']">
                         {{ row.fundflow_tag }}
                       </span>
                     </div>
@@ -257,7 +257,7 @@
                   <span>模型 {{ fmtPct(row.model_score) }}</span>
                   <span v-if="row.sector">{{ row.sector }}</span>
                   <span :class="row.pct_chg >= 0 ? 'up' : 'down'">{{ fmt(row.pct_chg) }}%</span>
-                  <span v-if="row.fundflow_tag" :class="['mini-badge', row.fundflow_tag_type === 'in' ? 'fund-in' : 'fund-out']">
+                  <span v-if="row.fundflow_tag" :class="['mini-badge', 'inline', row.fundflow_tag_type === 'in' ? 'fund-in' : 'fund-out']">
                     {{ row.fundflow_tag }}
                   </span>
                 </div>
@@ -1758,28 +1758,40 @@ onUnmounted(() => {
 .badge.avoid { background: #fde2e2; color: #b91c1c; }
 .badge.hot { background: #ffe4d6; color: #9a3412; }
 
-.mini-tags {
-  margin-top: 4px;
+.name-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
 }
 
 .mini-badge {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 2px 6px;
+  gap: 3px;
+  padding: 1px 6px;
   border-radius: 999px;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 600;
   line-height: 1.2;
+  border: 1px solid transparent;
+  white-space: nowrap;
+  letter-spacing: 0.01em;
+}
+
+.mini-badge.inline {
+  transform: translateY(1px);
 }
 
 .mini-badge.fund-in {
-  background: #dcfce7;
+  background: #f0fdf4;
+  border-color: #bbf7d0;
   color: #166534;
 }
 
 .mini-badge.fund-out {
-  background: #fee2e2;
+  background: #fef2f2;
+  border-color: #fecaca;
   color: #991b1b;
 }
 
@@ -1833,6 +1845,7 @@ onUnmounted(() => {
 
 .side .sub {
   display: flex;
+  flex-wrap: wrap;
   gap: 12px;
   color: #6b7280;
   font-size: 12px;
