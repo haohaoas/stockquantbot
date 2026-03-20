@@ -248,18 +248,20 @@
           <div v-else-if="modelTop.length === 0" class="muted">暂无模型结果</div>
           <ul v-else class="list">
             <li v-for="row in modelTop" :key="row.symbol" @contextmenu.prevent="openContextMenu($event, row.symbol)">
-              <div>
-                <div class="title">
-                  <span class="mono">{{ row.symbol }}</span>
-                  <span>{{ row.name }}</span>
+              <div class="model-main">
+                <div class="title-row">
+                  <div class="title">
+                    <span class="mono">{{ row.symbol }}</span>
+                    <span>{{ row.name }}</span>
+                  </div>
+                  <span v-if="row.fundflow_tag" :class="['mini-badge', 'model-fundflow', row.fundflow_tag_type === 'in' ? 'fund-in' : 'fund-out']">
+                    {{ row.fundflow_tag }}
+                  </span>
                 </div>
                 <div class="sub">
                   <span>模型 {{ fmtPct(row.model_score) }}</span>
                   <span v-if="row.sector">{{ row.sector }}</span>
                   <span :class="row.pct_chg >= 0 ? 'up' : 'down'">{{ fmt(row.pct_chg) }}%</span>
-                  <span v-if="row.fundflow_tag" :class="['mini-badge', 'inline', row.fundflow_tag_type === 'in' ? 'fund-in' : 'fund-out']">
-                    {{ row.fundflow_tag }}
-                  </span>
                 </div>
               </div>
               <button v-if="!isWatchlist" class="ghost" @click="addToWatchlist(row.symbol)">+自选</button>
@@ -1831,16 +1833,34 @@ onUnmounted(() => {
 .side .list li {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
+  gap: 12px;
   padding: 10px;
   border-radius: 10px;
   background: #f8fafc;
+}
+
+.side .model-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.side .title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
 }
 
 .side .title {
   display: flex;
   gap: 8px;
   font-weight: 600;
+  min-width: 0;
+}
+
+.side .title > span:last-child {
+  min-width: 0;
 }
 
 .side .sub {
@@ -1849,6 +1869,11 @@ onUnmounted(() => {
   gap: 12px;
   color: #6b7280;
   font-size: 12px;
+}
+
+.side .model-fundflow {
+  flex-shrink: 0;
+  margin-top: 2px;
 }
 
 .ghost {
