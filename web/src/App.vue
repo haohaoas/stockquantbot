@@ -121,7 +121,9 @@
                   <td class="mono col-symbol">{{ row.symbol }}</td>
                   <td class="col-name">
                     <div class="name-line">
-                      <span>{{ row.name }}</span>
+                      <span class="name-text">{{ row.name }}</span>
+                    </div>
+                    <div v-if="row.fundflow_tag" class="name-tag-row">
                       <span v-if="row.fundflow_tag" :class="['mini-badge', 'inline', row.fundflow_tag_type === 'in' ? 'fund-in' : 'fund-out']">
                         {{ row.fundflow_tag }}
                       </span>
@@ -249,14 +251,9 @@
           <ul v-else class="list">
             <li v-for="row in modelTop" :key="row.symbol" @contextmenu.prevent="openContextMenu($event, row.symbol)">
               <div class="model-main">
-                <div class="title-row">
-                  <div class="title">
-                    <span class="mono">{{ row.symbol }}</span>
-                    <span>{{ row.name }}</span>
-                  </div>
-                  <span v-if="row.fundflow_tag" :class="['mini-badge', 'model-fundflow', row.fundflow_tag_type === 'in' ? 'fund-in' : 'fund-out']">
-                    {{ row.fundflow_tag }}
-                  </span>
+                <div class="title">
+                  <span class="mono">{{ row.symbol }}</span>
+                  <span>{{ row.name }}</span>
                 </div>
                 <div class="sub">
                   <span>模型 {{ fmtPct(row.model_score) }}</span>
@@ -264,6 +261,9 @@
                   <span :class="row.pct_chg >= 0 ? 'up' : 'down'">{{ fmt(row.pct_chg) }}%</span>
                 </div>
               </div>
+              <span v-if="row.fundflow_tag" :class="['mini-badge', 'model-fundflow', row.fundflow_tag_type === 'in' ? 'fund-in' : 'fund-out']">
+                {{ row.fundflow_tag }}
+              </span>
               <button v-if="!isWatchlist" class="ghost" @click="addToWatchlist(row.symbol)">+自选</button>
             </li>
           </ul>
@@ -1762,9 +1762,18 @@ onUnmounted(() => {
 
 .name-line {
   display: flex;
-  align-items: center;
-  gap: 6px;
+  align-items: flex-start;
+  gap: 4px;
   min-width: 0;
+}
+
+.name-text {
+  display: block;
+  white-space: nowrap;
+}
+
+.name-tag-row {
+  margin-top: 4px;
 }
 
 .mini-badge {
@@ -1833,7 +1842,7 @@ onUnmounted(() => {
 .side .list li {
   display: flex;
   justify-content: space-between;
-  align-items: flex-start;
+  align-items: center;
   gap: 12px;
   padding: 10px;
   border-radius: 10px;
@@ -1843,13 +1852,6 @@ onUnmounted(() => {
 .side .model-main {
   flex: 1;
   min-width: 0;
-}
-
-.side .title-row {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
 }
 
 .side .title {
@@ -1873,7 +1875,7 @@ onUnmounted(() => {
 
 .side .model-fundflow {
   flex-shrink: 0;
-  margin-top: 2px;
+  align-self: center;
 }
 
 .ghost {
