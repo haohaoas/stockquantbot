@@ -152,13 +152,77 @@ def _normalize_rows(rows: list[dict]) -> pd.DataFrame:
 
     out = pd.DataFrame()
     out["date"] = df["t"].astype(str).str.slice(0, 10)
-    out["main_buy_amt"] = _num("zmbtdcjzl") + _num("zmbddcjzl") + _num("zmbzdcjzl") + _num("zmbxdcjzl")
-    out["main_sell_amt"] = _num("zmstdcjzl") + _num("zmsddcjzl") + _num("zmszdcjzl") + _num("zmsxdcjzl")
-    out["main_net_inflow"] = out["main_buy_amt"] - out["main_sell_amt"]
-    out["large_main_net_inflow"] = (_num("zmbtdcjzl") + _num("zmbddcjzl")) - (_num("zmstdcjzl") + _num("zmsddcjzl"))
+
+    # Core flow indicators and order-count deltas.
+    out["main_buy_order_count"] = _num("zmbzds")
+    out["main_sell_order_count"] = _num("zmszds")
+    out["main_buy_order_count_delta"] = _num("zmbzdszl")
+    out["main_sell_order_count_delta"] = _num("zmszdszl")
+    out["trade_count_delta"] = _num("cjbszl")
     out["big_order_direction"] = _num("dddx")
     out["price_driver"] = _num("zddy")
     out["big_order_diff"] = _num("ddcf")
+
+    # Active main-force amount deltas by order size.
+    out["main_buy_super_amt"] = _num("zmbtdcjzl")
+    out["main_buy_big_amt"] = _num("zmbddcjzl")
+    out["main_buy_mid_amt"] = _num("zmbzdcjzl")
+    out["main_buy_small_amt"] = _num("zmbxdcjzl")
+    out["main_sell_super_amt"] = _num("zmstdcjzl")
+    out["main_sell_big_amt"] = _num("zmsddcjzl")
+    out["main_sell_mid_amt"] = _num("zmszdcjzl")
+    out["main_sell_small_amt"] = _num("zmsxdcjzl")
+
+    # Passive amount deltas by order size.
+    out["passive_buy_super_amt"] = _num("bdmbtdcjzl")
+    out["passive_buy_big_amt"] = _num("bdmbddcjzl")
+    out["passive_buy_mid_amt"] = _num("bdmbzdcjzl")
+    out["passive_buy_small_amt"] = _num("bdmbxdcjzl")
+    out["passive_sell_super_amt"] = _num("bdmstdcjzl")
+    out["passive_sell_big_amt"] = _num("bdmsddcjzl")
+    out["passive_sell_mid_amt"] = _num("bdmszdcjzl")
+    out["passive_sell_small_amt"] = _num("bdmsxdcjzl")
+
+    # Active main-force volume deltas by order size.
+    out["main_buy_super_vol"] = _num("zmbtdcjzlv")
+    out["main_buy_big_vol"] = _num("zmbddcjzlv")
+    out["main_buy_mid_vol"] = _num("zmbzdcjzlv")
+    out["main_buy_small_vol"] = _num("zmbxdcjzlv")
+    out["main_sell_super_vol"] = _num("zmstdcjzlv")
+    out["main_sell_big_vol"] = _num("zmsddcjzlv")
+    out["main_sell_mid_vol"] = _num("zmszdcjzlv")
+    out["main_sell_small_vol"] = _num("zmsxdcjzlv")
+
+    # Passive volume deltas by order size.
+    out["passive_buy_super_vol"] = _num("bdmbtdcjzlv")
+    out["passive_buy_big_vol"] = _num("bdmbddcjzlv")
+    out["passive_buy_mid_vol"] = _num("bdmbzdcjzlv")
+    out["passive_buy_small_vol"] = _num("bdmbxdcjzlv")
+    out["passive_sell_super_vol"] = _num("bdmstdcjzlv")
+    out["passive_sell_big_vol"] = _num("bdmsddcjzlv")
+    out["passive_sell_mid_vol"] = _num("bdmszdcjzlv")
+    out["passive_sell_small_vol"] = _num("bdmsxdcjzlv")
+
+    # Aggregated helper fields used directly by the app.
+    out["main_buy_amt"] = (
+        out["main_buy_super_amt"]
+        + out["main_buy_big_amt"]
+        + out["main_buy_mid_amt"]
+        + out["main_buy_small_amt"]
+    )
+    out["main_sell_amt"] = (
+        out["main_sell_super_amt"]
+        + out["main_sell_big_amt"]
+        + out["main_sell_mid_amt"]
+        + out["main_sell_small_amt"]
+    )
+    out["main_net_inflow"] = out["main_buy_amt"] - out["main_sell_amt"]
+    out["large_main_net_inflow"] = (
+        out["main_buy_super_amt"]
+        + out["main_buy_big_amt"]
+        - out["main_sell_super_amt"]
+        - out["main_sell_big_amt"]
+    )
     out = out.dropna(subset=["date"]).drop_duplicates(subset=["date"], keep="last")
     out = out.sort_values("date").reset_index(drop=True)
     return out
