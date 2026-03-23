@@ -180,7 +180,7 @@ _HOT_SECTOR_CACHE: dict[str, object] = {"ts": 0.0, "sectors": []}
 _MODEL_SCORE_CACHE: dict[str, object] = {"key": "", "ts": 0.0, "scores": None}
 _UNIVERSE_NAME_CACHE: dict[str, dict[str, str]] = {}
 _MANUAL_UNIVERSE_CACHE: dict[str, list[str]] = {}
-_FUND_FLOW_CACHE: dict[str, pd.DataFrame] = {}
+_FUND_FLOW_CACHE: dict[str, tuple[float, pd.DataFrame]] = {}
 
 
 def clear_runtime_caches() -> None:
@@ -339,7 +339,17 @@ def _derive_model_top_aux_features(hist: pd.DataFrame) -> tuple[float, float]:
 def _load_fundflow_tail(fundflow_dir: str, symbol: str, tail_rows: int = 5) -> pd.DataFrame:
     p = Path(fundflow_dir) / f"{str(symbol).zfill(6)}.csv"
     cache_key = str(p.resolve())
-    cached = _FUND_FLOW_CACHE.get(cache_key)
+    file_mtime = 0.0
+    try:
+        file_mtime = float(p.stat().st_mtime) if p.exists() else 0.0
+    except Exception:
+        file_mtime = 0.0
+    cache_entry = _FUND_FLOW_CACHE.get(cache_key)
+    cached = None
+    if cache_entry is not None:
+        cached_mtime, cached_df = cache_entry
+        if cached_mtime == file_mtime:
+            cached = cached_df
     if cached is None:
         if not p.exists():
             return pd.DataFrame()
@@ -358,7 +368,7 @@ def _load_fundflow_tail(fundflow_dir: str, symbol: str, tail_rows: int = 5) -> p
             if c in out.columns:
                 out[c] = pd.to_numeric(out[c], errors="coerce")
         out = out.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
-        _FUND_FLOW_CACHE[cache_key] = out
+        _FUND_FLOW_CACHE[cache_key] = (file_mtime, out)
         cached = out
     if cached is None or cached.empty:
         return pd.DataFrame()
