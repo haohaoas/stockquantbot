@@ -492,10 +492,7 @@ function isTradeDateStale(serverTimeText, tradeDateText) {
 
 function guardStaleTradeDate(sourceLabel = '页面') {
   if (!isTradeDateStale(serverTime.value, tradeDate.value)) return false
-  notes.value = [`${sourceLabel}数据日期落后于服务器时间，正在自动纠正并重载页面`]
-  setTimeout(() => {
-    resetPageStateAndReload()
-  }, 300)
+  notes.value = [`${sourceLabel}数据日期落后于服务器时间，当前保留页面状态，请稍后手动刷新确认`]
   return true
 }
 
