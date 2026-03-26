@@ -70,6 +70,9 @@ def main() -> None:
     ]
     if not args.fundflow_full:
         fundflow_cmd.append("--only-stale")
+        # For fundflow we want each run to re-check file freshness/date coverage.
+        # Reusing the old checkpoint can incorrectly skip all symbols forever.
+        fundflow_cmd.append("--reset-checkpoint")
     if args.fundflow_require_columns.strip():
         fundflow_cmd.extend(["--require-columns", args.fundflow_require_columns.strip()])
 
