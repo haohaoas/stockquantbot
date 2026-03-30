@@ -1539,6 +1539,7 @@ class ReviewRequest(BaseModel):
     watchlist: list[dict[str, Any]] | None = None
     operations: list[dict[str, Any]] | None = None
     note_text: str | None = None
+    format: str | None = None
 
 
 @app.post("/api/explain")
@@ -2488,6 +2489,215 @@ def _local_review_text(snapshot: dict[str, Any]) -> str:
     return "".join(lines)
 
 
+def _review_score_band(score: float) -> str:
+    if score >= 85:
+        return "优秀"
+    if score >= 70:
+        return "良好"
+    if score >= 55:
+        return "一般"
+    return "较弱"
+
+
+def _calc_review_dimension_scores(snapshot: dict[str, Any], card: dict[str, Any]) -> dict[str, Any]:
+    operations = snapshot.get("operations") or []
+    model_top = snapshot.get("top_model") or []
+    top_buy = snapshot.get("top_buy") or []
+    news = snapshot.get("news_summary") or {}
+    avg_result_pct = snapshot.get("avg_result_pct")
+    sentiment_score = float(news.get("score") or 50)
+    risk_level = str(news.get("risk_level", "") or "medium").lower()
+    error_tag = str(card.get("error_tag", "") or "")
+
+    tech_score = 45.0
+    if top_buy:
+        tech_score += min(20.0, 6.0 * len(top_buy[:3]))
+    if model_top:
+        avg_model = sum(float(x.get("model_score") or 0.0) for x in model_top[:5]) / max(1, len(model_top[:5]))
+        tech_score += min(20.0, avg_model * 25.0)
+    tech_score = max(0.0, min(100.0, tech_score))
+
+    execution_score = 60.0 if operations else 45.0
+    if avg_result_pct is not None:
+        execution_score += max(-25.0, min(25.0, float(avg_result_pct) * 6.0))
+    if error_tag in {"追涨", "无止损"}:
+        execution_score -= 18.0
+    elif error_tag == "提前止盈":
+        execution_score -= 10.0
+    execution_score = max(0.0, min(100.0, execution_score))
+
+    market_score = sentiment_score
+    if risk_level == "low":
+        market_score += 10.0
+    elif risk_level == "high":
+        market_score -= 12.0
+    market_score = max(0.0, min(100.0, market_score))
+
+    synergy_score = 40.0
+    if top_buy and model_top:
+        buy_syms = {str(x.get("symbol", "") or "") for x in top_buy[:5]}
+        model_syms = {str(x.get("symbol", "") or "") for x in model_top[:5]}
+        overlap = len(buy_syms & model_syms)
+        synergy_score += overlap * 15.0
+    elif top_buy or model_top:
+        synergy_score += 10.0
+    synergy_score = max(0.0, min(100.0, synergy_score))
+
+    total_score = tech_score * 0.30 + execution_score * 0.30 + market_score * 0.20 + synergy_score * 0.20
+    return {
+        "technical": round(tech_score, 1),
+        "execution": round(execution_score, 1),
+        "market": round(market_score, 1),
+        "synergy": round(synergy_score, 1),
+        "total": round(total_score, 1),
+        "rating": _review_score_band(total_score),
+    }
+
+
+def _local_structured_review_text(snapshot: dict[str, Any], card: dict[str, Any]) -> str:
+    scores = _calc_review_dimension_scores(snapshot, card)
+    review_date = str(snapshot.get("review_date", _today_cn_str()) or _today_cn_str())
+    top_buy = snapshot.get("top_buy") or []
+    top_watch = snapshot.get("top_watch") or []
+    top_model = snapshot.get("top_model") or []
+    operations = snapshot.get("operations") or []
+    watchlist = snapshot.get("watchlist") or []
+    notes = snapshot.get("notes") or []
+    news = snapshot.get("news_summary") or {}
+    hot_sectors = "、".join(news.get("hot_sectors") or []) or "暂无"
+    right_points = card.get("right_points") or []
+    wrong_points = card.get("wrong_points") or []
+    plans = card.get("tomorrow_plan") or []
+
+    def _fmt_top(items: list[dict[str, Any]], *, use_model: bool = False) -> str:
+        parts: list[str] = []
+        for row in items[:3]:
+            sym = str(row.get("symbol", "") or "")
+            name = str(row.get("name", "") or "")
+            sector = str(row.get("sector", "") or "")
+            if use_model:
+                score = float(row.get("model_score") or 0.0) * 100.0
+                seg = f"{sym} {name} 模型{score:.2f}%"
+            else:
+                score = float(row.get("score") or 0.0)
+                action = str(row.get("action", "") or "")
+                seg = f"{sym} {name} {action} {score:.2f}"
+            if sector:
+                seg += f"（{sector}）"
+            parts.append(seg.strip())
+        return "；".join(parts) or "暂无"
+
+    op_lines: list[str] = []
+    for op in operations[:5]:
+        sym = str(op.get("symbol", "") or "")
+        side = str(op.get("side", "") or "").upper()
+        price = pd.to_numeric(op.get("price"), errors="coerce")
+        result_pct = pd.to_numeric(op.get("result_pct"), errors="coerce")
+        reason = str(op.get("reason", "") or "").strip()
+        seg = f"{sym or '--'} {side or '--'}"
+        if not pd.isna(price):
+            seg += f" @{float(price):.2f}"
+        if not pd.isna(result_pct):
+            seg += f" / {float(result_pct):+.2f}%"
+        if reason:
+            seg += f" / {reason}"
+        op_lines.append(seg)
+    if not op_lines:
+        op_lines.append("今日未记录明确交易，复盘以候选信号和计划为主。")
+
+    wl_text = "、".join(f"{x.get('symbol')} {x.get('name')}".strip() for x in watchlist[:5]) or "暂无"
+    note_text = str(snapshot.get("note_text", "") or "").strip() or "暂无额外主观笔记。"
+    lines = [
+        f"# 当日结构化复盘 {review_date}",
+        "",
+        "## 一、综合概览",
+        f"综合评分：{scores['total']:.1f}分（{scores['rating']}）",
+        f"技术/信号：{scores['technical']:.1f}，执行纪律：{scores['execution']:.1f}，市场环境：{scores['market']:.1f}，规则模型共振：{scores['synergy']:.1f}",
+        f"市场情绪：{news.get('market_sentiment', 'neutral')}，风险等级：{news.get('risk_level', 'medium')}，热点板块：{hot_sectors}",
+        "",
+        "## 二、规则与模型观察",
+        f"规则侧 BUY：{snapshot.get('buy_count', 0)} 只；WATCH：{snapshot.get('watch_count', 0)} 只；候选总数：{snapshot.get('row_count', 0)}",
+        f"规则侧重点：{_fmt_top(top_buy)}",
+        f"观察名单：{_fmt_top(top_watch)}",
+        f"模型 Top：{_fmt_top(top_model, use_model=True)}",
+        f"自选池：{wl_text}",
+        "",
+        "## 三、今日执行复盘",
+        *[f"{idx + 1}. {line}" for idx, line in enumerate(op_lines)],
+        "",
+        "## 四、做对与待改进",
+        "做对：",
+        *[f"- {x}" for x in (right_points[:3] or ['暂无明显亮点，至少完成了记录与复盘动作。'])],
+        "待改进：",
+        *[f"- {x}" for x in (wrong_points[:3] or ['暂无明显硬错误，继续观察执行一致性。'])],
+        "",
+        "## 五、明日计划",
+        *[f"{idx + 1}. {x}" for idx, x in enumerate(plans[:3] or ['等待规则与模型共振后再动手。'])],
+        "",
+        "## 六、补充备注",
+        f"系统备注：{'；'.join(str(x) for x in notes[:3]) or '暂无'}",
+        f"主观笔记：{note_text}",
+        "",
+        "## 七、三行复盘笔记",
+        "1. 今天做对的一件事：__________",
+        "2. 今天最该修正的一件事：__________",
+        "3. 明天必须执行的一条纪律：__________",
+    ]
+    return "\n".join(lines).strip()
+
+
+def _generate_structured_review_text(
+    snapshot: dict[str, Any],
+    card: dict[str, Any],
+    cfg: dict,
+    *,
+    proxy: str = "",
+    use_proxy: bool = False,
+) -> tuple[str, str]:
+    deep_cfg = cfg.get("deepseek", {}) or {}
+    api_key = _load_deepseek_key()
+    fallback = _local_structured_review_text(snapshot, card)
+    if not deep_cfg.get("enabled", False) or not api_key:
+        return fallback, "local-structured"
+
+    prompt = (
+        "你是A股短线交易复盘助手。请基于给定结构化快照与笔记卡，输出一份结构化复盘报告。"
+        "请严格按以下章节输出："
+        "一、综合概览；二、规则与模型观察；三、今日执行复盘；四、做对与待改进；五、明日计划；六、补充备注；七、三行复盘笔记。"
+        "要求：中文，简洁但具体，不编造数据，不要免责声明，不使用Markdown表格，总长度控制在500~900字。"
+        f"\n\n快照:{json.dumps(snapshot, ensure_ascii=False)}"
+        f"\n\n笔记卡:{json.dumps(card, ensure_ascii=False)}"
+    )
+    payload = {
+        "model": str(deep_cfg.get("model", "deepseek-chat") or "deepseek-chat"),
+        "messages": [
+            {"role": "system", "content": "你是严谨、克制的A股复盘报告助手。"},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": max(0.1, float(deep_cfg.get("temperature", 0.2) or 0.2)),
+        "max_tokens": max(700, int(deep_cfg.get("max_tokens", 900) or 900)),
+    }
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    proxies = {"http": proxy, "https": proxy} if use_proxy and proxy else None
+    try:
+        resp = requests.post(
+            _resolve_deepseek_url(str(deep_cfg.get("base_url", "https://api.deepseek.com"))),
+            headers=headers,
+            json=payload,
+            timeout=35,
+            proxies=proxies,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        text = str(text or "").strip()
+        if not text:
+            return fallback, "local-structured"
+        return text, "deepseek-structured"
+    except Exception:
+        return fallback, "local-structured"
+
+
 def _resolve_deepseek_url(base_url: str) -> str:
     base = (base_url or "").rstrip("/")
     if base.endswith("/v1/chat/completions"):
@@ -2571,10 +2781,13 @@ def review(req: ReviewRequest) -> dict:
         req_base = req.dict() if hasattr(req, "dict") else req.model_dump()
         req_base.update({"review_date": review_date, "operations": operations, "note_text": note_text})
         req_for_snapshot = ReviewRequest(**req_base)
-        snapshot = _build_review_snapshot(req_for_snapshot)
-        text, source = _generate_review_text(snapshot, cfg, proxy=proxy, use_proxy=use_proxy)
-
         card = _build_review_card(review_date, operations or [], rows=req.rows, model_top=req.model_top)
+        snapshot = _build_review_snapshot(req_for_snapshot)
+        review_format = str(req.format or "").strip().lower()
+        if review_format == "structured":
+            text, source = _generate_structured_review_text(snapshot, card, cfg, proxy=proxy, use_proxy=use_proxy)
+        else:
+            text, source = _generate_review_text(snapshot, cfg, proxy=proxy, use_proxy=use_proxy)
         monitor_path = _write_monitor_config(review_date, card)
 
         day["operations"] = [_normalize_operation(x) for x in (operations or []) if isinstance(x, dict)]

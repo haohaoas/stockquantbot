@@ -300,9 +300,12 @@
             @keydown="onChatInputKeydown"
           ></textarea>
           <div class="muted">{{ chatSending ? '发送中...' : '聊天会自动抽取操作、关联行情并更新右侧笔记卡。' }}</div>
-          <div class="review-actions single-action">
+          <div class="review-actions">
             <button class="ghost primary" @click="generateReview" :disabled="reviewLoading">
               {{ reviewLoading ? '生成中...' : '生成今日复盘' }}
+            </button>
+            <button class="ghost" @click="generateStructuredReview" :disabled="reviewLoading">
+              {{ reviewLoading ? '生成中...' : '生成结构化复盘' }}
             </button>
           </div>
           <div v-if="reviewError" class="muted">{{ reviewError }}</div>
@@ -1091,6 +1094,14 @@ async function sendChat() {
 }
 
 async function generateReview() {
+  await requestReview('summary')
+}
+
+async function generateStructuredReview() {
+  await requestReview('structured')
+}
+
+async function requestReview(format = 'summary') {
   reviewLoading.value = true
   reviewError.value = ''
   try {
@@ -1106,7 +1117,8 @@ async function generateReview() {
         watchlist: watchlist.value,
         review_date: reviewDate.value,
         operations: reviewOperations.value,
-        note_text: ''
+        note_text: '',
+        format
       })
     })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
