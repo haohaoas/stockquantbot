@@ -1078,7 +1078,16 @@ async function sendChat() {
         text
       })
     })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    if (!res.ok) {
+      let detail = ''
+      try {
+        const err = await res.json()
+        detail = String(err?.detail || err?.error || '').trim()
+      } catch (_) {
+        detail = (await res.text()).trim()
+      }
+      throw new Error(detail || `HTTP ${res.status}`)
+    }
     const data = await res.json()
     if (data.error) throw new Error(data.error)
     reviewMessages.value = data.messages || []
@@ -1121,7 +1130,16 @@ async function requestReview(format = 'summary') {
         format
       })
     })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    if (!res.ok) {
+      let detail = ''
+      try {
+        const err = await res.json()
+        detail = String(err?.detail || err?.error || '').trim()
+      } catch (_) {
+        detail = (await res.text()).trim()
+      }
+      throw new Error(detail || `HTTP ${res.status}`)
+    }
     const data = await res.json()
     reviewText.value = data.review || ''
     reviewSource.value = data.source || ''

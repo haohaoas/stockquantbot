@@ -14,7 +14,7 @@ from typing import Any
 
 import pandas as pd
 import requests
-from fastapi import FastAPI, Body, Query, Request
+from fastapi import FastAPI, Body, HTTPException, Query, Request
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -240,6 +240,26 @@ def _load_deepseek_key() -> str:
     if key:
         return key
     return str(os.environ.get("DEEPSEEK_API_KEY") or "")
+
+
+def _review_deepseek_strict(cfg: dict, kind: str) -> bool:
+    deep_cfg = cfg.get("deepseek", {}) or {}
+    if kind == "chat":
+        return bool(deep_cfg.get("chat_strict", True))
+    if kind == "review":
+        return bool(deep_cfg.get("review_strict", True))
+    return True
+
+
+def _review_deepseek_error(cfg: dict, kind: str, exc: Exception | None = None) -> RuntimeError:
+    deep_cfg = cfg.get("deepseek", {}) or {}
+    model = str(deep_cfg.get("model", "deepseek-chat") or "deepseek-chat")
+    if exc is None:
+        msg = f"复盘{ '聊天' if kind == 'chat' else '生成' }当前必须使用 DeepSeek，但配置未就绪（model={model}）。"
+    else:
+        detail = str(exc).strip() or exc.__class__.__name__
+        msg = f"复盘{ '聊天' if kind == 'chat' else '生成' }调用 DeepSeek 失败：{detail}"
+    return RuntimeError(msg)
 
 
 def _find_row_in_cache(symbol: str) -> dict[str, Any] | None:
@@ -2322,16 +2342,18 @@ def _generate_chat_reply(
     proxy: str = "",
     use_proxy: bool = False,
 ) -> tuple[str, str]:
-    fallback = _build_local_chat_reply(
-        user_text=user_text,
-        review_date=review_date,
-        extracted_ops=extracted_ops,
-        operations=operations,
-        market_context=market_context,
-    )
     deep_cfg = cfg.get("deepseek", {}) or {}
     api_key = _load_deepseek_key()
     if not deep_cfg.get("enabled", False) or not api_key:
+        if _review_deepseek_strict(cfg, "chat"):
+            raise _review_deepseek_error(cfg, "chat")
+        fallback = _build_local_chat_reply(
+            user_text=user_text,
+            review_date=review_date,
+            extracted_ops=extracted_ops,
+            operations=operations,
+            market_context=market_context,
+        )
         return fallback, "local"
 
     history = []
@@ -2390,9 +2412,27 @@ def _generate_chat_reply(
         text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
         text = str(text or "").strip()
         if not text:
+            if _review_deepseek_strict(cfg, "chat"):
+                raise _review_deepseek_error(cfg, "chat", RuntimeError("返回内容为空"))
+            fallback = _build_local_chat_reply(
+                user_text=user_text,
+                review_date=review_date,
+                extracted_ops=extracted_ops,
+                operations=operations,
+                market_context=market_context,
+            )
             return fallback, "local"
         return text, "deepseek"
-    except Exception:
+    except Exception as exc:
+        if _review_deepseek_strict(cfg, "chat"):
+            raise _review_deepseek_error(cfg, "chat", exc)
+        fallback = _build_local_chat_reply(
+            user_text=user_text,
+            review_date=review_date,
+            extracted_ops=extracted_ops,
+            operations=operations,
+            market_context=market_context,
+        )
         return fallback, "local"
 
 
@@ -2658,6 +2698,8 @@ def _generate_structured_review_text(
     api_key = _load_deepseek_key()
     fallback = _local_structured_review_text(snapshot, card)
     if not deep_cfg.get("enabled", False) or not api_key:
+        if _review_deepseek_strict(cfg, "review"):
+            raise _review_deepseek_error(cfg, "review")
         return fallback, "local-structured"
 
     prompt = (
@@ -2692,9 +2734,13 @@ def _generate_structured_review_text(
         text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
         text = str(text or "").strip()
         if not text:
+            if _review_deepseek_strict(cfg, "review"):
+                raise _review_deepseek_error(cfg, "review", RuntimeError("返回内容为空"))
             return fallback, "local-structured"
         return text, "deepseek-structured"
-    except Exception:
+    except Exception as exc:
+        if _review_deepseek_strict(cfg, "review"):
+            raise _review_deepseek_error(cfg, "review", exc)
         return fallback, "local-structured"
 
 
@@ -2711,6 +2757,8 @@ def _generate_review_text(snapshot: dict[str, Any], cfg: dict, *, proxy: str = "
     deep_cfg = cfg.get("deepseek", {}) or {}
     api_key = _load_deepseek_key()
     if not deep_cfg.get("enabled", False) or not api_key:
+        if _review_deepseek_strict(cfg, "review"):
+            raise _review_deepseek_error(cfg, "review")
         return _local_review_text(snapshot), "local"
 
     prompt = (
@@ -2751,9 +2799,13 @@ def _generate_review_text(snapshot: dict[str, Any], cfg: dict, *, proxy: str = "
         )
         text = str(text or "").strip()
         if not text:
+            if _review_deepseek_strict(cfg, "review"):
+                raise _review_deepseek_error(cfg, "review", RuntimeError("返回内容为空"))
             return _local_review_text(snapshot), "local"
         return text, "deepseek"
-    except Exception:
+    except Exception as exc:
+        if _review_deepseek_strict(cfg, "review"):
+            raise _review_deepseek_error(cfg, "review", exc)
         return _local_review_text(snapshot), "local"
 
 
@@ -2784,10 +2836,13 @@ def review(req: ReviewRequest) -> dict:
         card = _build_review_card(review_date, operations or [], rows=req.rows, model_top=req.model_top)
         snapshot = _build_review_snapshot(req_for_snapshot)
         review_format = str(req.format or "").strip().lower()
-        if review_format == "structured":
-            text, source = _generate_structured_review_text(snapshot, card, cfg, proxy=proxy, use_proxy=use_proxy)
-        else:
-            text, source = _generate_review_text(snapshot, cfg, proxy=proxy, use_proxy=use_proxy)
+        try:
+            if review_format == "structured":
+                text, source = _generate_structured_review_text(snapshot, card, cfg, proxy=proxy, use_proxy=use_proxy)
+            else:
+                text, source = _generate_review_text(snapshot, cfg, proxy=proxy, use_proxy=use_proxy)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         monitor_path = _write_monitor_config(review_date, card)
 
         day["operations"] = [_normalize_operation(x) for x in (operations or []) if isinstance(x, dict)]
@@ -2858,19 +2913,22 @@ def review_chat(payload: dict = Body(...)) -> dict:
         month = review_date[:7]
         month_stats = _month_error_stats(journal, month)
 
-        reply, source = _generate_chat_reply(
-            user_text=text,
-            review_date=review_date,
-            day=day,
-            extracted_ops=extracted_ops,
-            operations=day.get("operations", []),
-            market_context=market_context,
-            card=day.get("draft_card", {}),
-            month_stats=month_stats,
-            cfg=cfg,
-            proxy=proxy,
-            use_proxy=use_proxy,
-        )
+        try:
+            reply, source = _generate_chat_reply(
+                user_text=text,
+                review_date=review_date,
+                day=day,
+                extracted_ops=extracted_ops,
+                operations=day.get("operations", []),
+                market_context=market_context,
+                card=day.get("draft_card", {}),
+                month_stats=month_stats,
+                cfg=cfg,
+                proxy=proxy,
+                use_proxy=use_proxy,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         assistant_msg = _normalize_chat_message({"role": "assistant", "text": reply})
         day["messages"].append(assistant_msg)
         day["chat_source"] = source

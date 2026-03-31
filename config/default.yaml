@@ -324,6 +324,8 @@ deepseek:
   model: deepseek-chat
   temperature: 0.2
   max_tokens: 300
+  chat_strict: true
+  review_strict: true
 news:
   summary_cache_sec: 300
   hot_sector_aliases:
