@@ -1,0 +1,104 @@
+{
+  "type": "lightgbm",
+  "features": [
+    "ret_1d",
+    "price_accel_5",
+    "price_accel_10",
+    "price_vs_high_20",
+    "price_vs_ma_5",
+    "gap_1d",
+    "body_ratio",
+    "volume_ratio_5",
+    "bull_volume",
+    "bear_volume",
+    "volume_change_20d_neg",
+    "volume_shrink_20d",
+    "rsi_6",
+    "rsi_12",
+    "kdj_j",
+    "wr_14",
+    "cci_20",
+    "atr_percent"
+  ],
+  "model_path": "lightgbm_fd1_raw_y3_thr2p_weakwin_20260403_norefit.lgb.txt",
+  "impute": {
+    "ret_1d": -0.0013395849290564722,
+    "price_accel_5": 0.014706147389695529,
+    "price_accel_10": 0.023412440624743194,
+    "price_vs_high_20": 0.9,
+    "price_vs_ma_5": -0.005550416281220993,
+    "gap_1d": -0.0011534025374855261,
+    "body_ratio": 0.4499977500112468,
+    "volume_ratio_5": 0.9299611858263467,
+    "bull_volume": 0.0,
+    "bear_volume": 0.0,
+    "volume_change_20d_neg": 0.10396386738610533,
+    "volume_shrink_20d": 0.0,
+    "rsi_6": 42.29555469454786,
+    "rsi_12": 43.320654304793116,
+    "kdj_j": 32.857631030696076,
+    "wr_14": 69.07212934426323,
+    "cci_20": -39.42894824823102,
+    "atr_percent": 0.036037899185728875
+  },
+  "meta": {
+    "task": "cls",
+    "forward_days": 1,
+    "years": 3,
+    "feature_set": "compact",
+    "weak_window_only": true,
+    "weak_windows": [
+      {
+        "val_start": "2024-06-04",
+        "val_end": "2024-09-30",
+        "ret20": 1.1586475382240786
+      },
+      {
+        "val_start": "2024-04-08",
+        "val_end": "2024-08-02",
+        "ret20": 1.2636798177197224
+      },
+      {
+        "val_start": "2025-08-04",
+        "val_end": "2025-12-03",
+        "ret20": 2.029067186069317
+      },
+      {
+        "val_start": "2025-10-09",
+        "val_end": "2026-02-03",
+        "ret20": 2.1233907383787445
+      },
+      {
+        "val_start": "2025-12-04",
+        "val_end": "2026-04-03",
+        "ret20": 2.2560573158727597
+      }
+    ],
+    "expanded_days": 338,
+    "rolling_days": true,
+    "train_days": 80,
+    "val_days": 24,
+    "step_days": 12,
+    "val_topk": 0.7108695652173914,
+    "val_precision_k": 0.7108695652173914,
+    "val_topk_ret": 3.526616404127154,
+    "val_topk_ret_raw": 3.526616404127154,
+    "label_mode": "raw",
+    "cls_label_mode": "threshold",
+    "cls_threshold": 2.0,
+    "cls_threshold_mode": "fixed",
+    "cls_drop_neutral": true,
+    "recent_weight_months": 6,
+    "recent_weight_mult": 1.7,
+    "feature_fraction": 0.9,
+    "bagging_fraction": 0.9,
+    "bagging_freq": 1,
+    "early_stopping_rounds": 0,
+    "best_window": [
+      "2024-05-22",
+      "2024-09-11",
+      "2024-09-12",
+      "2024-10-24"
+    ]
+  }
+}
